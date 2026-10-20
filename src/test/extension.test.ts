@@ -1,9 +1,107 @@
 import * as assert from 'assert';
+import * as vscode from 'vscode';
+import * as path from 'node:path';
+import { mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { buildDiagnostics } from '../providers/diagnosticsProvider';
+import { DependencyAnalysisService } from '../services/analysis';
+import { CratesIoService } from '../services/cratesIo';
 import { isOutdated } from '../providers/hintsProvider';
-import { parseAuditReport, parseCargoJson } from '../services/cargo';
+import { CargoService, parseAuditReport, parseCargoJson } from '../services/cargo';
 import { parseDependencies } from '../services/manifest';
 
 suite('Extension Test Suite', () => {
+	test('analyzes closed workspace manifests with a shared audit and inherited versions', async () => {
+		const root = await mkdtemp(path.join(tmpdir(), 'cargo-deps-'));
+		const member = path.join(root, 'member');
+		let auditCalls = 0;
+		class TestCargoService extends CargoService {
+			override async workspaceRoot() { return root; }
+			override async audit() { auditCalls++; return []; }
+			override async outdated() { return []; }
+		}
+		class TestCratesIoService extends CratesIoService {
+			override async getReleaseInfo() { return { latestVersion: '4.10.1', versions: [] }; }
+		}
+		const analysis = new DependencyAnalysisService(new TestCargoService(), new TestCratesIoService());
+		const collection = vscode.languages.createDiagnosticCollection('cargo-deps-batch-test');
+		const subscription = analysis.onDidAnalyze(snapshot => {
+			collection.set(vscode.Uri.file(path.join(snapshot.root, 'Cargo.toml')), buildDiagnostics(snapshot));
+		});
+		try {
+			await mkdir(member);
+			await writeFile(path.join(root, 'Cargo.toml'), '[workspace]\nmembers = ["member"]\n[workspace.dependencies]\nserialport = "4.9.0"');
+			await writeFile(path.join(member, 'Cargo.toml'), '[package]\nname = "member"\nversion = "0.1.0"\n[dependencies]\nserialport.workspace = true');
+			await analysis.refreshAll([root, member, member]);
+			assert.strictEqual(auditCalls, 1);
+			for (const manifestRoot of [root, member]) {
+				const uri = vscode.Uri.file(path.join(manifestRoot, 'Cargo.toml'));
+				assert.ok(!vscode.workspace.textDocuments.some(document => document.uri.toString() === uri.toString()));
+				assert.strictEqual(analysis.getSnapshot(manifestRoot)?.dependencies[0].installedVersion, '4.9.0');
+				assert.strictEqual(collection.get(uri)?.[0].severity, vscode.DiagnosticSeverity.Information);
+			}
+			assert.strictEqual(collection.get(vscode.Uri.file(path.join(member, 'Cargo.toml')))?.[0].range.start.line, 4);
+			analysis.forget(member);
+			assert.strictEqual(analysis.getSnapshot(member), undefined);
+		} finally {
+			subscription.dispose();
+			collection.dispose();
+			analysis.dispose();
+			await rm(root, { recursive: true, force: true });
+		}
+	});
+
+	test('publishes info on the version and warnings for transitive advisories', async () => {
+		const contents = '[dependencies]\neframe = { version = "0.36.2" }';
+		const dependencies = await parseDependencies(contents);
+		const diagnostics = buildDiagnostics({
+			root: '/example', contents, updatedAt: 0,
+			dependencies: [{
+				dependency: dependencies[0], installedVersion: '0.36.2', latestVersion: '0.37.0', versions: [],
+				advisories: [{
+					id: 'RUSTSEC-2026-0192', title: 'ttf-parser is unmaintained', severity: 'unmaintained',
+					packageName: 'ttf-parser', packageVersion: '0.25.1',
+				}],
+			}],
+		});
+		assert.strictEqual(diagnostics.length, 2);
+		assert.strictEqual(diagnostics[0].severity, vscode.DiagnosticSeverity.Information);
+		assert.strictEqual(diagnostics[1].severity, vscode.DiagnosticSeverity.Warning);
+		assert.ok(diagnostics[1].message.includes('eframe -> ttf-parser 0.25.1'));
+		for (const diagnostic of diagnostics) {
+			assert.strictEqual(diagnostic.source, 'cargo-deps');
+			assert.strictEqual(diagnostic.range.start.line, 1);
+			assert.strictEqual(contents.split('\n')[1].slice(diagnostic.range.start.character, diagnostic.range.end.character), '0.36.2');
+		}
+		const collection = vscode.languages.createDiagnosticCollection('cargo-deps-test');
+		try {
+			const uri = vscode.Uri.file('/example/Cargo.toml');
+			collection.set(uri, diagnostics);
+			assert.strictEqual(collection.get(uri)?.length, 2);
+			collection.set(uri, []);
+			assert.strictEqual(collection.get(uri)?.length, 0);
+		} finally {
+			collection.dispose();
+		}
+	});
+
+	test('locates inherited diagnostics and skips updates for local or current dependencies', async () => {
+		const contents = '[dependencies]\ntracing.workspace = true\ncommons = { path = "../commons", version = "1.2.0" }';
+		const dependencies = await parseDependencies(contents);
+		const snapshot = {
+			root: '/example', contents, updatedAt: 0,
+			dependencies: dependencies.map(dependency => ({
+				dependency, installedVersion: '1.2.0', latestVersion: '1.3.0', versions: [], advisories: [],
+			})),
+		};
+		const diagnostics = buildDiagnostics(snapshot);
+		assert.strictEqual(diagnostics.length, 1);
+		assert.strictEqual(diagnostics[0].range.start.line, 1);
+		assert.strictEqual(contents.split('\n')[1].slice(diagnostics[0].range.start.character, diagnostics[0].range.end.character), 'true');
+		snapshot.dependencies[0].latestVersion = '1.2.0';
+		assert.deepStrictEqual(buildDiagnostics(snapshot), []);
+	});
+
 	test('parses direct, aliased, and target-specific dependencies without comments', async () => {
 		const contents = [
 			'# fake = "9.9.9"',

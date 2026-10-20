@@ -11,6 +11,8 @@ export class DependencyAnalysisService {
 	private readonly warned = new Set<string>();
 	private readonly changeEmitter = new vscode.EventEmitter<void>();
 	readonly onDidChange = this.changeEmitter.event;
+	private readonly analysisEmitter = new vscode.EventEmitter<AnalysisSnapshot>();
+	readonly onDidAnalyze = this.analysisEmitter.event;
 
 	constructor(
 		private readonly cargo = new CargoService(),
@@ -19,43 +21,67 @@ export class DependencyAnalysisService {
 
 	dispose(): void {
 		this.changeEmitter.dispose();
+		this.analysisEmitter.dispose();
 	}
 
 	getSnapshot(root: string): AnalysisSnapshot | undefined {
 		return this.snapshots.get(root);
 	}
 
-	refresh(root: string): Promise<void> {
+	forget(root: string): void {
+		this.snapshots.delete(root);
+		this.changeEmitter.fire();
+	}
+
+	refresh(root: string, audits = new Map<string, Promise<CargoAuditEntry[]>>()): Promise<void> {
 		const pending = this.inFlight.get(root);
 		if (pending) {
 			return pending;
 		}
 
-		const operation = this.analyze(root).finally(() => {
+		const operation = this.analyze(root, audits).finally(() => {
 			this.inFlight.delete(root);
 		});
 		this.inFlight.set(root, operation);
 		return operation;
 	}
 
-	private async analyze(root: string): Promise<void> {
+	async refreshAll(roots: string[]): Promise<void> {
+		const audits = new Map<string, Promise<CargoAuditEntry[]>>();
+		for (const root of new Set(roots)) {
+			await this.refresh(root, audits);
+		}
+	}
+
+	private async analyze(root: string, audits: Map<string, Promise<CargoAuditEntry[]>>): Promise<void> {
 		const manifest = vscode.Uri.file(path.join(root, 'Cargo.toml'));
 		let dependencies: Dependency[];
+		let contents: string;
+		let workspaceRoot: string;
 		try {
 			const bytes = await vscode.workspace.fs.readFile(manifest);
-			const workspaceRoot = await this.cargo.workspaceRoot(root);
+			contents = new TextDecoder().decode(bytes);
+			workspaceRoot = await this.cargo.workspaceRoot(root);
 			const workspaceDependencies = workspaceRoot === root
 				? []
 				: await vscode.workspace.fs.readFile(vscode.Uri.file(path.join(workspaceRoot, 'Cargo.toml')))
 					.then(workspaceBytes => parseDependencies(new TextDecoder().decode(workspaceBytes)));
-			dependencies = await parseDependencies(new TextDecoder().decode(bytes), workspaceDependencies);
+			dependencies = await parseDependencies(contents, workspaceDependencies);
 		} catch (error) {
+			this.snapshots.delete(root);
+			this.analysisEmitter.fire({ root, contents: '', dependencies: [], updatedAt: Date.now() });
+			this.changeEmitter.fire();
 			this.warnOnce('manifest', `Unable to read Cargo.toml: ${errorMessage(error)}`);
 			return;
 		}
 
+		let audit = audits.get(workspaceRoot);
+		if (!audit) {
+			audit = this.runCargoStep('cargo-audit', workspaceRoot, () => this.cargo.audit(workspaceRoot), []);
+			audits.set(workspaceRoot, audit);
+		}
 		const [auditEntries, outdatedEntries] = await Promise.all([
-			this.runCargoStep('cargo-audit', root, () => this.cargo.audit(root), []),
+			audit,
 			this.runCargoStep('cargo-outdated', root, () => this.cargo.outdated(root), []),
 		]);
 		const advisories = await this.attachAdvisories(root, dependencies, auditEntries);
@@ -80,7 +106,9 @@ export class DependencyAnalysisService {
 			} satisfies DependencyHealth;
 		}));
 
-		this.snapshots.set(root, { root, dependencies: health, updatedAt: Date.now() });
+		const snapshot = { root, contents, dependencies: health, updatedAt: Date.now() };
+		this.snapshots.set(root, snapshot);
+		this.analysisEmitter.fire(snapshot);
 		this.changeEmitter.fire();
 	}
 

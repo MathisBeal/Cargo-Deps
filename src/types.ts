@@ -36,6 +36,7 @@ export interface DependencyHealth {
 
 export interface AnalysisSnapshot {
 	root: string;
+	contents: string;
 	dependencies: DependencyHealth[];
 	updatedAt: number;
 }
