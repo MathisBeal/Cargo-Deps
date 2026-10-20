@@ -2,7 +2,13 @@
   "name": "cargo-deps",
   "displayName": "Cargo-Deps",
   "description": "Manage your cargo dependencies",
-  "version": "0.0.1",
+  "publisher": "MathisBEAL",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/MathisBeal/Cargo-Deps.git"
+  },
+  "version": "0.1.0",
+  "license": "MIT",
   "engines": {
     "vscode": "^1.140.0"
   },
@@ -11,8 +17,7 @@
   ],
   "activationEvents": [
     "onLanguage:toml",
-    "workspaceContains:**/Cargo.toml",
-    "onCommand:cargo-deps.refresh"
+    "workspaceContains:**/Cargo.toml"
   ],
   "main": "./dist/extension.js",
   "contributes": {
