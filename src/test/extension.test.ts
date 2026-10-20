@@ -1,6 +1,6 @@
 import * as assert from 'assert';
 import { isOutdated } from '../providers/hintsProvider';
-import { parseAuditReport } from '../services/cargo';
+import { parseAuditReport, parseCargoJson } from '../services/cargo';
 import { parseDependencies } from '../services/manifest';
 
 suite('Extension Test Suite', () => {
@@ -33,6 +33,48 @@ suite('Extension Test Suite', () => {
 		]);
 	});
 
+	test('resolves workspace-inherited dependency versions and package aliases', async () => {
+		const workspaceDependencies = await parseDependencies([
+			'[workspace.dependencies]',
+			'serialport = "4.9.0"',
+			'"serial-port" = { package = "serialport", version = "4.8.0" }',
+		].join('\n'));
+		const memberDependencies = await parseDependencies([
+			'[dependencies]',
+			'serialport.workspace = true',
+			'"serial-port" = { workspace = true, optional = true }',
+		].join('\n'), workspaceDependencies);
+
+		assert.deepStrictEqual(memberDependencies.map(dependency => ({
+			name: dependency.name,
+			packageName: dependency.packageName,
+			versionRequirement: dependency.versionRequirement,
+			line: dependency.line,
+		})), [
+			{ name: 'serialport', packageName: 'serialport', versionRequirement: '4.9.0', line: 1 },
+			{ name: 'serial-port', packageName: 'serialport', versionRequirement: '4.8.0', line: 2 },
+		]);
+	});
+
+	test('marks path dependencies as local instead of treating them as crates.io crates', async () => {
+		const dependencies = await parseDependencies([
+			'[dependencies]',
+			'commons = { path = "../commons", version = "1.2.0" }',
+		].join('\n'));
+
+		assert.deepStrictEqual(dependencies.map(dependency => ({
+			name: dependency.name,
+			packageName: dependency.packageName,
+			versionRequirement: dependency.versionRequirement,
+			localPath: dependency.localPath,
+		})), [{
+			name: 'commons',
+			packageName: 'commons',
+			versionRequirement: '1.2.0',
+			localPath: '../commons',
+		}]);
+	});
+
 	test('does not mark an installed latest version as outdated', () => {
 		assert.strictEqual(isOutdated('1.2.3', '1.2.3'), false);
 		assert.strictEqual(isOutdated('1.2.2', '1.2.3'), true);
@@ -57,5 +99,15 @@ suite('Extension Test Suite', () => {
 			title: '`ttf-parser` is unmaintained',
 			severity: 'unmaintained',
 		}]);
+	});
+
+	test('parses cargo outdated newline-delimited JSON', () => {
+		assert.deepStrictEqual(parseCargoJson([
+			'{"crate_name":"demo_app","dependencies":[{"name":"serialport","project":"4.9.0","latest":"4.10.1"}]}',
+			'{"crate_name":"driver_commons","dependencies":[{"name":"serialport","project":"4.9.0","latest":"4.10.1"}]}',
+		].join('\n')), [
+			{ crate_name: 'demo_app', dependencies: [{ name: 'serialport', project: '4.9.0', latest: '4.10.1' }] },
+			{ crate_name: 'driver_commons', dependencies: [{ name: 'serialport', project: '4.9.0', latest: '4.10.1' }] },
+		]);
 	});
 });

@@ -14,7 +14,7 @@ export class CargoCommandError extends Error {
 
 export class CargoService {
 	async audit(root: string): Promise<CargoAuditEntry[]> {
-		const workspaceRoot = await this.findWorkspaceRoot(root);
+		const workspaceRoot = await this.workspaceRoot(root);
 		const data = await this.runJson(workspaceRoot, ['audit', '--json'], 'cargo-audit');
 		return parseAuditReport(data);
 	}
@@ -47,7 +47,7 @@ export class CargoService {
 		return this.runText(root, ['tree', '--invert', `${packageName}@${version}`, '--prefix', 'depth']);
 	}
 
-	private async findWorkspaceRoot(root: string): Promise<string> {
+	async workspaceRoot(root: string): Promise<string> {
 		try {
 			const manifest = await this.runText(root, ['locate-project', '--workspace', '--message-format', 'plain']);
 			return path.dirname(manifest.trim().replace(/^"|"$/g, ''));
@@ -59,7 +59,7 @@ export class CargoService {
 	private async runJson(root: string, args: string[], toolName: string): Promise<unknown> {
 		const output = await this.runText(root, args, toolName);
 		try {
-			return JSON.parse(output) as unknown;
+			return parseCargoJson(output);
 		} catch {
 			throw new CargoCommandError(`${toolName} returned invalid JSON.`, false);
 		}
@@ -87,6 +87,18 @@ export class CargoService {
 				missingTool,
 			);
 		}
+	}
+}
+
+export function parseCargoJson(output: string): unknown {
+	try {
+		return JSON.parse(output) as unknown;
+	} catch {
+		const lines = output.split(/\r?\n/).filter(line => line.trim().length > 0);
+		if (lines.length === 0) {
+			throw new Error('Empty JSON output');
+		}
+		return lines.map(line => JSON.parse(line) as unknown);
 	}
 }
 

@@ -2,10 +2,11 @@ import type { Dependency } from '../types';
 
 const DEPENDENCY_TABLES = new Set(['dependencies', 'dev-dependencies', 'build-dependencies']);
 
-export async function parseDependencies(contents: string): Promise<Dependency[]> {
+export async function parseDependencies(contents: string, workspaceDependencies: Dependency[] = []): Promise<Dependency[]> {
 	const { parse } = await import('smol-toml');
 	const parsed = parse(contents) as Record<string, unknown>;
 	const locations = findDependencyLocations(contents);
+	const workspaceByName = new Map(workspaceDependencies.map(dependency => [dependency.name, dependency]));
 	const dependencies: Dependency[] = [];
 
 	const visit = (value: unknown, path: string[]) => {
@@ -22,6 +23,7 @@ export async function parseDependencies(contents: string): Promise<Dependency[]>
 				name,
 				packageName: typeof table.package === 'string' ? table.package : name,
 				versionRequirement: typeof table.version === 'string' ? table.version : '*',
+				localPath: typeof table.path === 'string' ? table.path : undefined,
 				line,
 			});
 			return;
@@ -42,13 +44,15 @@ export async function parseDependencies(contents: string): Promise<Dependency[]>
 					continue;
 				}
 
-				const packageName = typeof details.package === 'string' ? details.package : name;
+				const inherited = details.workspace === true ? workspaceByName.get(name) : undefined;
+				const packageName = typeof details.package === 'string' ? details.package : inherited?.packageName ?? name;
 				const section = path.join('.');
 				const line = locations.get(`${section}:${name}`)?.shift() ?? locations.get(`*:${name}`)?.shift() ?? 0;
 				dependencies.push({
 					name,
 					packageName,
-					versionRequirement: typeof details.version === 'string' ? details.version : '*',
+					versionRequirement: typeof details.version === 'string' ? details.version : inherited?.versionRequirement ?? '*',
+					localPath: typeof details.path === 'string' ? details.path : inherited?.localPath,
 					line,
 				});
 			}
@@ -94,7 +98,7 @@ function findDependencyLocations(contents: string): Map<string, number[]> {
 			continue;
 		}
 
-		const assignment = /^\s*(?:"([^"]+)"|'([^']+)'|([A-Za-z0-9_-]+))\s*=/.exec(original);
+		const assignment = /^\s*(?:"([^"]+)"|'([^']+)'|([A-Za-z0-9_-]+)(?:\.[A-Za-z0-9_-]+)*)\s*=/.exec(original);
 		if (!assignment) {
 			continue;
 		}

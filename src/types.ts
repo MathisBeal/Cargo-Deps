@@ -2,6 +2,7 @@ export interface Dependency {
 	name: string;
 	packageName: string;
 	versionRequirement: string;
+	localPath?: string;
 	line: number;
 }
 

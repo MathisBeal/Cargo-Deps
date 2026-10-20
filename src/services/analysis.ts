@@ -43,7 +43,12 @@ export class DependencyAnalysisService {
 		let dependencies: Dependency[];
 		try {
 			const bytes = await vscode.workspace.fs.readFile(manifest);
-			dependencies = await parseDependencies(new TextDecoder().decode(bytes));
+			const workspaceRoot = await this.cargo.workspaceRoot(root);
+			const workspaceDependencies = workspaceRoot === root
+				? []
+				: await vscode.workspace.fs.readFile(vscode.Uri.file(path.join(workspaceRoot, 'Cargo.toml')))
+					.then(workspaceBytes => parseDependencies(new TextDecoder().decode(workspaceBytes)));
+			dependencies = await parseDependencies(new TextDecoder().decode(bytes), workspaceDependencies);
 		} catch (error) {
 			this.warnOnce('manifest', `Unable to read Cargo.toml: ${errorMessage(error)}`);
 			return;
@@ -57,17 +62,19 @@ export class DependencyAnalysisService {
 
 		const health = await Promise.all(dependencies.map(async dependency => {
 			let releaseInfo: CrateReleaseInfo = { latestVersion: '', versions: [] };
-			try {
-				releaseInfo = await this.cratesIo.getReleaseInfo(dependency.packageName);
-			} catch (error) {
-				this.warnOnce('crates.io', `Unable to retrieve crate versions from crates.io: ${errorMessage(error)}`);
+			if (!dependency.localPath) {
+				try {
+					releaseInfo = await this.cratesIo.getReleaseInfo(dependency.packageName);
+				} catch (error) {
+					this.warnOnce('crates.io', `Unable to retrieve crate versions from crates.io: ${errorMessage(error)}`);
+				}
 			}
 
 			const outdated = findOutdatedEntry(outdatedEntries, dependency);
 			return {
 				dependency,
 				installedVersion: outdated?.project || cleanVersion(dependency.versionRequirement),
-				latestVersion: outdated?.latest || releaseInfo.latestVersion,
+				latestVersion: dependency.localPath ? '' : outdated?.latest || releaseInfo.latestVersion,
 				versions: releaseInfo.versions,
 				advisories: advisories.get(dependency.name) ?? [],
 			} satisfies DependencyHealth;

@@ -24,11 +24,12 @@ export class CargoHoverProvider implements vscode.HoverProvider {
 
 function buildHover(health: DependencyHealth): vscode.MarkdownString {
 	const { dependency, installedVersion, latestVersion, advisories, versions } = health;
+	const isLocal = Boolean(dependency.localPath);
 	const markdown = new vscode.MarkdownString();
 	markdown.isTrusted = false;
 	markdown.appendMarkdown(`### ${escapeMarkdown(dependency.name)}\n\n`);
-	markdown.appendMarkdown(`Installed: ${inlineCode(installedVersion || dependency.versionRequirement)} · Latest: ${inlineCode(latestVersion || 'unknown')}\n\n`);
-	markdown.appendMarkdown(`**Status:** ${isOutdated(installedVersion, latestVersion) ? 'Update available' : 'Up to date or unknown'}\n\n`);
+	markdown.appendMarkdown(`Installed: ${inlineCode(installedVersion || dependency.versionRequirement)} · Latest: ${inlineCode(isLocal ? 'local' : latestVersion || 'unknown')}\n\n`);
+	markdown.appendMarkdown(`**Status:** ${isLocal ? `Local path dependency (${inlineCode(dependency.localPath ?? '')})` : isOutdated(installedVersion, latestVersion) ? 'Update available' : 'Up to date or unknown'}\n\n`);
 
 	markdown.appendMarkdown('#### Security advisories & warnings\n');
 	if (advisories.length === 0) {
@@ -41,15 +42,16 @@ function buildHover(health: DependencyHealth): vscode.MarkdownString {
 			}
 			markdown.appendMarkdown('\n');
 			if (advisory.treePath) {
-				markdown.appendMarkdown('\nDependency tree:\n```text\n');
-				markdown.appendText(advisory.treePath.trim());
-				markdown.appendMarkdown('\n```\n');
+				markdown.appendMarkdown('\nDependency tree:\n');
+				markdown.appendCodeblock(advisory.treePath.trim(), 'text');
 			}
 		}
 	}
 
 	markdown.appendMarkdown('\n#### Recent releases\n');
-	if (versions.length === 0) {
+	if (isLocal) {
+		markdown.appendMarkdown('Local dependencies do not use crates.io release history.\n');
+	} else if (versions.length === 0) {
 		markdown.appendMarkdown('Release history unavailable.\n');
 	} else {
 		for (const version of versions.slice(0, 10)) {
