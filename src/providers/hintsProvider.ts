@@ -33,8 +33,15 @@ export class CargoHintsProvider implements vscode.InlayHintsProvider {
 			if (isOutdated(health.installedVersion, health.latestVersion)) {
 				labels.push(`❌ ${health.installedVersion} -> ${health.latestVersion}`);
 			}
-			if (health.advisories.length > 0) {
+			const warningKinds = new Set(['unmaintained', 'unsound', 'yanked']);
+			const auditWarnings = [...new Set(health.advisories
+				.map(advisory => advisory.severity?.toLowerCase())
+				.filter((severity): severity is string => Boolean(severity && warningKinds.has(severity))))];
+			if (health.advisories.some(advisory => !warningKinds.has(advisory.severity?.toLowerCase() ?? ''))) {
 				labels.push('⚠️ Vulnérabilité détectée');
+			}
+		if (auditWarnings.length > 0) {
+				labels.push(`⚠️ cargo audit: ${auditWarnings.join(', ')}`);
 			}
 			if (labels.length === 0) {
 				return [];

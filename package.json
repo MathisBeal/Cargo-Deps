@@ -11,6 +11,7 @@
   ],
   "activationEvents": [
     "onLanguage:toml",
+    "workspaceContains:**/Cargo.toml",
     "onCommand:cargo-deps.refresh"
   ],
   "main": "./dist/extension.js",

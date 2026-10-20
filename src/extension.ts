@@ -10,7 +10,7 @@ import { CargoHoverProvider } from './providers/hoverProvider';
 // Your extension is activated the very first time the command is executed
 export function activate(context: vscode.ExtensionContext) {
 	const analysis = new DependencyAnalysisService();
-	const selector: vscode.DocumentSelector = { language: 'toml', scheme: 'file' };
+	const selector: vscode.DocumentSelector = { scheme: 'file', pattern: '**/Cargo.toml' };
 	context.subscriptions.push(
 		analysis,
 		vscode.languages.registerInlayHintsProvider(selector, new CargoHintsProvider(analysis)),

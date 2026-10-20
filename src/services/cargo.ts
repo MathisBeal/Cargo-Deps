@@ -1,5 +1,6 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
+import * as path from 'node:path';
 import type { CargoAuditEntry, CargoOutdatedEntry } from '../types';
 
 const execFileAsync = promisify(execFile);
@@ -13,25 +14,9 @@ export class CargoCommandError extends Error {
 
 export class CargoService {
 	async audit(root: string): Promise<CargoAuditEntry[]> {
-		const data = await this.runJson(root, ['audit', '--json'], 'cargo-audit');
-		const vulnerabilities = objectValue(objectValue(data).vulnerabilities);
-		const entries = Array.isArray(vulnerabilities.list) ? vulnerabilities.list : [];
-		return entries.flatMap(value => {
-			const entry = objectValue(value);
-			const advisory = objectValue(entry.advisory);
-			const packageInfo = objectValue(entry.package);
-			const packageName = stringValue(packageInfo.name);
-			if (!packageName) {
-				return [];
-			}
-			return [{
-				packageName,
-				packageVersion: stringValue(packageInfo.version),
-				id: stringValue(advisory.id, 'Unknown advisory'),
-				title: stringValue(advisory.title, 'No title available'),
-				severity: stringValue(advisory.severity) || stringValue(advisory.cvss),
-			}];
-		});
+		const workspaceRoot = await this.findWorkspaceRoot(root);
+		const data = await this.runJson(workspaceRoot, ['audit', '--json'], 'cargo-audit');
+		return parseAuditReport(data);
 	}
 
 	async outdated(root: string): Promise<CargoOutdatedEntry[]> {
@@ -60,6 +45,15 @@ export class CargoService {
 
 	async inverseTree(root: string, packageName: string, version: string): Promise<string> {
 		return this.runText(root, ['tree', '--invert', `${packageName}@${version}`, '--prefix', 'depth']);
+	}
+
+	private async findWorkspaceRoot(root: string): Promise<string> {
+		try {
+			const manifest = await this.runText(root, ['locate-project', '--workspace', '--message-format', 'plain']);
+			return path.dirname(manifest.trim().replace(/^"|"$/g, ''));
+		} catch {
+			return root;
+		}
 	}
 
 	private async runJson(root: string, args: string[], toolName: string): Promise<unknown> {
@@ -94,6 +88,44 @@ export class CargoService {
 			);
 		}
 	}
+}
+
+export function parseAuditReport(data: unknown): CargoAuditEntry[] {
+	const report = objectValue(data);
+	const vulnerabilities = objectValue(report.vulnerabilities);
+	const vulnerabilityEntries = Array.isArray(vulnerabilities.list)
+		? vulnerabilities.list.map(value => ({ value }))
+		: [];
+	const warningEntries = Object.entries(objectValue(report.warnings)).flatMap(([kind, group]) => {
+		const entries = Array.isArray(group)
+			? group
+			: Array.isArray(objectValue(group).list)
+				? objectValue(group).list as unknown[]
+				: [];
+		return entries.map(value => ({ value, kind }));
+	});
+	const allEntries: Array<{ value: unknown; kind?: string }> = [...vulnerabilityEntries, ...warningEntries];
+
+	return allEntries.flatMap(({ value, kind }) => {
+		const entry = objectValue(value);
+		const advisory = objectValue(entry.advisory);
+		const packageInfo = objectValue(entry.package);
+		const packageName = stringValue(packageInfo.name);
+		if (!packageName) {
+			return [];
+		}
+		return [{
+			packageName,
+			packageVersion: stringValue(packageInfo.version),
+			id: stringValue(advisory.id, 'Unknown advisory'),
+			title: stringValue(advisory.title, 'No title available'),
+			severity: stringValue(advisory.severity)
+				|| stringValue(advisory.cvss)
+				|| stringValue(advisory.informational)
+				|| stringValue(entry.kind)
+				|| kind,
+		}];
+	});
 }
 
 function objectValue(value: unknown): Record<string, unknown> {

@@ -27,10 +27,10 @@ function buildHover(health: DependencyHealth): vscode.MarkdownString {
 	const markdown = new vscode.MarkdownString();
 	markdown.isTrusted = false;
 	markdown.appendMarkdown(`### ${escapeMarkdown(dependency.name)}\n\n`);
-	markdown.appendMarkdown(`Installed: \`${escapeMarkdown(installedVersion || dependency.versionRequirement)}\` · Latest: \`${escapeMarkdown(latestVersion || 'unknown')}\`\n\n`);
+	markdown.appendMarkdown(`Installed: ${inlineCode(installedVersion || dependency.versionRequirement)} · Latest: ${inlineCode(latestVersion || 'unknown')}\n\n`);
 	markdown.appendMarkdown(`**Status:** ${isOutdated(installedVersion, latestVersion) ? 'Update available' : 'Up to date or unknown'}\n\n`);
 
-	markdown.appendMarkdown('#### Vulnerabilities\n');
+	markdown.appendMarkdown('#### Security advisories & warnings\n');
 	if (advisories.length === 0) {
 		markdown.appendMarkdown('No known vulnerabilities reported by `cargo audit`.\n');
 	} else {
@@ -58,7 +58,7 @@ function buildHover(health: DependencyHealth): vscode.MarkdownString {
 				version.number === installedVersion ? 'installed' : '',
 				version.yanked ? 'yanked' : '',
 			].filter(Boolean);
-			markdown.appendMarkdown(`- \`${escapeMarkdown(version.number)}\`${labels.length ? ` (${labels.join(', ')})` : ''}\n`);
+			markdown.appendMarkdown(`- ${inlineCode(version.number)}${labels.length ? ` (${labels.join(', ')})` : ''}\n`);
 		}
 	}
 	return markdown;
@@ -66,4 +66,11 @@ function buildHover(health: DependencyHealth): vscode.MarkdownString {
 
 function escapeMarkdown(value: string): string {
 	return value.replace(/[\\`*_{}\[\]()#+.!|>~-]/g, '\\$&');
+}
+
+function inlineCode(value: string): string {
+	const runs = [...value.matchAll(/`+/g)].map(match => match[0].length);
+	const fence = '`'.repeat(Math.max(1, ...runs) + 1);
+	const padding = value.startsWith('`') || value.endsWith('`') ? ' ' : '';
+	return `${fence}${padding}${value}${padding}${fence}`;
 }

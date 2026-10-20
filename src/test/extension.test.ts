@@ -1,5 +1,6 @@
 import * as assert from 'assert';
 import { isOutdated } from '../providers/hintsProvider';
+import { parseAuditReport } from '../services/cargo';
 import { parseDependencies } from '../services/manifest';
 
 suite('Extension Test Suite', () => {
@@ -35,5 +36,26 @@ suite('Extension Test Suite', () => {
 	test('does not mark an installed latest version as outdated', () => {
 		assert.strictEqual(isOutdated('1.2.3', '1.2.3'), false);
 		assert.strictEqual(isOutdated('1.2.2', '1.2.3'), true);
+	});
+
+	test('parses cargo audit unmaintained warnings', () => {
+		const advisories = parseAuditReport({
+			vulnerabilities: { list: [] },
+			warnings: {
+				unmaintained: [{
+					kind: 'unmaintained',
+					package: { name: 'ttf-parser', version: '0.25.1' },
+					advisory: { id: 'RUSTSEC-2026-0192', title: '`ttf-parser` is unmaintained', informational: 'unmaintained' },
+				}],
+			},
+		});
+
+		assert.deepStrictEqual(advisories, [{
+			packageName: 'ttf-parser',
+			packageVersion: '0.25.1',
+			id: 'RUSTSEC-2026-0192',
+			title: '`ttf-parser` is unmaintained',
+			severity: 'unmaintained',
+		}]);
 	});
 });
