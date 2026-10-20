@@ -24,8 +24,8 @@ For example:
 
 This extension contributes the following settings:
 
-* `myExtension.enable`: Enable/disable this extension.
-* `myExtension.thing`: Set to `blah` to do something.
+- `myExtension.enable`: Enable/disable this extension.
+- `myExtension.thing`: Set to `blah` to do something.
 
 ## Known Issues
 
@@ -47,25 +47,30 @@ Fixed issue #.
 
 Added features X, Y, and Z.
 
----
+# Cargo-Deps
 
-## Following extension guidelines
+Extension VS Code pour consulter l'etat des dependances Rust directement dans `Cargo.toml`.
 
-Ensure that you've read through the extensions guidelines and follow the best practices for creating your extension.
+## Fonctionnalites
 
-* [Extension Guidelines](https://code.visualstudio.com/api/references/extension-guidelines)
+- Inlay hints pour les versions obsoletes et les vulnerabilites RustSec.
+- Survol d'une dependance avec sa version installee, la derniere version, les avis de securite, l'historique crates.io et les traces transitives.
+- Analyse relancee a l'ouverture et a l'enregistrement de `Cargo.toml`, avec cache pour les reponses crates.io.
+- Rafraichissement manuel via `Cargo Deps: Refresh Dependency Analysis` dans la palette de commandes.
 
-## Working with Markdown
+## Prerequis
 
-You can author your README using Visual Studio Code. Here are some useful editor keyboard shortcuts:
+- Une installation de Rust et Cargo.
+- `cargo-audit`, installable avec `cargo install cargo-audit`.
+- `cargo-outdated`, installable avec `cargo install cargo-outdated`.
+- Un acces reseau a crates.io pour les versions publiees.
 
-* Split the editor (`Cmd+\` on macOS or `Ctrl+\` on Windows and Linux).
-* Toggle preview (`Shift+Cmd+V` on macOS or `Shift+Ctrl+V` on Windows and Linux).
-* Press `Ctrl+Space` (Windows, Linux, macOS) to see a list of Markdown snippets.
+L'extension reste active si `cargo-audit` ou `cargo-outdated` est absent et affiche un avertissement avec la commande d'installation.
 
-## For more information
+## Developpement
 
-* [Visual Studio Code's Markdown Support](http://code.visualstudio.com/docs/languages/markdown)
-* [Markdown Syntax Reference](https://help.github.com/articles/markdown-basics/)
-
-**Enjoy!**
+```sh
+pnpm install
+pnpm run compile
+pnpm test
+```

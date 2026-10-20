@@ -1,26 +1,47 @@
 // The module 'vscode' contains the VS Code extensibility API
 // Import the module and reference it with the alias vscode in your code below
 import * as vscode from 'vscode';
+import * as path from 'node:path';
+import { DependencyAnalysisService } from './services/analysis';
+import { CargoHintsProvider } from './providers/hintsProvider';
+import { CargoHoverProvider } from './providers/hoverProvider';
 
 // This method is called when your extension is activated
 // Your extension is activated the very first time the command is executed
 export function activate(context: vscode.ExtensionContext) {
+	const analysis = new DependencyAnalysisService();
+	const selector: vscode.DocumentSelector = { language: 'toml', scheme: 'file' };
+	context.subscriptions.push(
+		analysis,
+		vscode.languages.registerInlayHintsProvider(selector, new CargoHintsProvider(analysis)),
+		vscode.languages.registerHoverProvider(selector, new CargoHoverProvider(analysis)),
+		vscode.workspace.onDidOpenTextDocument(document => refreshDocument(document, analysis)),
+		vscode.workspace.onDidSaveTextDocument(document => refreshDocument(document, analysis)),
+		vscode.commands.registerCommand('cargo-deps.refresh', async () => {
+			const document = vscode.window.activeTextEditor?.document;
+			if (!document || !isCargoManifest(document)) {
+				void vscode.window.showWarningMessage('Open a Cargo.toml file to refresh dependency analysis.');
+				return;
+			}
+			await analysis.refresh(path.dirname(document.uri.fsPath));
+			void vscode.window.showInformationMessage('Cargo dependency analysis refreshed.');
+		}),
+	);
 
-	// Use the console to output diagnostic information (console.log) and errors (console.error)
-	// This line of code will only be executed once when your extension is activated
-	console.log('Congratulations, your extension "cargo-deps" is now active!');
-
-	// The command has been defined in the package.json file
-	// Now provide the implementation of the command with registerCommand
-	// The commandId parameter must match the command field in package.json
-	const disposable = vscode.commands.registerCommand('cargo-deps.helloWorld', () => {
-		// The code you place here will be executed every time your command is executed
-		// Display a message box to the user
-		vscode.window.showInformationMessage('Hello World from Cargo-Deps!');
-	});
-
-	context.subscriptions.push(disposable);
+	for (const document of vscode.workspace.textDocuments) {
+		refreshDocument(document, analysis);
+	}
 }
 
 // This method is called when your extension is deactivated
 export function deactivate() {}
+
+function refreshDocument(document: vscode.TextDocument, analysis: DependencyAnalysisService): void {
+	if (isCargoManifest(document)) {
+		void analysis.refresh(path.dirname(document.uri.fsPath));
+	}
+}
+
+function isCargoManifest(document: vscode.TextDocument): boolean {
+	return document.uri.scheme === 'file' && path.basename(document.uri.fsPath) === 'Cargo.toml';
+}
