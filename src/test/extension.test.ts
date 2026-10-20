@@ -7,10 +7,54 @@ import { buildDiagnostics } from '../providers/diagnosticsProvider';
 import { DependencyAnalysisService } from '../services/analysis';
 import { CratesIoService } from '../services/cratesIo';
 import { isOutdated } from '../providers/hintsProvider';
+import { formatDependencyPath } from '../providers/hoverProvider';
 import { CargoService, parseAuditReport, parseCargoJson } from '../services/cargo';
 import { parseDependencies } from '../services/manifest';
 
 suite('Extension Test Suite', () => {
+	test('renders the shortest dependency path without unrelated branches or depth prefixes', () => {
+		const tree = [
+			'0ttf-parser v0.25.1',
+			'1owned_ttf_parser v0.25.1',
+			'2ab_glyph v0.2.32',
+			'3sctk-adwaita v0.10.1',
+			'4winit v0.30.13',
+			'5accesskit_winit v0.32.2',
+			'6egui-winit v0.36.2',
+			'7eframe v0.36.2',
+			'8demo_app v1.2.0 (/example/demo_app)',
+			'5eframe v0.36.2 (*)',
+			'5egui-wgpu v0.36.2',
+			'6eframe v0.36.2 (*)',
+		].join('\n');
+		assert.strictEqual(formatDependencyPath(tree, 'eframe'), [
+			'eframe v0.36.2',
+			'└─ winit v0.30.13',
+			'  └─ sctk-adwaita v0.10.1',
+			'    └─ ab_glyph v0.2.32',
+			'      └─ owned_ttf_parser v0.25.1',
+			'        └─ ttf-parser v0.25.1',
+		].join('\n'));
+	});
+
+	test('connects repeated subtrees without mixing sibling branches', () => {
+		const tree = [
+			'0paste v1.0.15 (proc-macro)',
+			'1stackbox v0.2.2',
+			'2egui_taffy v0.14.0',
+			'3demo_lib v1.2.0 (/example/demo_lib)',
+			'1other v1.0.0',
+			'2stackbox v0.2.2 (*)',
+		].join('\n');
+		assert.strictEqual(formatDependencyPath(tree, 'egui_taffy'), [
+			'egui_taffy v0.14.0',
+			'└─ stackbox v0.2.2',
+			'  └─ paste v1.0.15',
+		].join('\n'));
+		assert.strictEqual(formatDependencyPath(tree, 'missing'), undefined);
+		assert.strictEqual(formatDependencyPath('', 'eframe'), undefined);
+	});
+
 	test('analyzes closed workspace manifests with a shared audit and inherited versions', async () => {
 		const root = await mkdtemp(path.join(tmpdir(), 'cargo-deps-'));
 		const member = path.join(root, 'member');

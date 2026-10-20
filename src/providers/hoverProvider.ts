@@ -42,8 +42,13 @@ function buildHover(health: DependencyHealth): vscode.MarkdownString {
 			}
 			markdown.appendMarkdown('\n');
 			if (advisory.treePath) {
-				markdown.appendMarkdown('\nDependency tree:\n');
-				markdown.appendCodeblock(advisory.treePath.trim(), 'text');
+				const dependencyPath = formatDependencyPath(advisory.treePath, dependency.packageName);
+				if (dependencyPath) {
+					markdown.appendMarkdown('\nShortest dependency path:\n');
+					markdown.appendCodeblock(dependencyPath, 'text');
+				} else {
+					markdown.appendMarkdown('\nDependency path unavailable.\n');
+				}
 			}
 		}
 	}
@@ -64,6 +69,49 @@ function buildHover(health: DependencyHealth): vscode.MarkdownString {
 		}
 	}
 	return markdown;
+}
+
+export function formatDependencyPath(tree: string, packageName: string): string | undefined {
+	const dependencies = new Map<string, Set<string>>();
+	const names = new Map<string, string>();
+	const ancestors: string[] = [];
+	let affected: string | undefined;
+	for (const line of tree.split(/\r?\n/)) {
+		const entry = /^(\d+)([A-Za-z0-9_-]+) v([^\s]+)/.exec(line.trim());
+		if (!entry) {
+			continue;
+		}
+		const depth = Number(entry[1]);
+		const node = `${entry[2]} v${entry[3]}`;
+		names.set(node, entry[2]);
+		if (depth === 0 && !affected) {
+			affected = node;
+		}
+		if (depth > 0 && ancestors[depth - 1]) {
+			const parents = dependencies.get(node) ?? new Set<string>();
+			parents.add(ancestors[depth - 1]);
+			dependencies.set(node, parents);
+		}
+		ancestors.length = depth;
+		ancestors.push(node);
+	}
+
+	const queue = [...names].filter(([, name]) => name === packageName).map(([node]) => [node]);
+	const visited = new Set(queue.map(chain => chain[0]));
+	for (let index = 0; index < queue.length; index++) {
+		const chain = queue[index];
+		const node = chain[chain.length - 1];
+		if (node === affected) {
+			return chain.map((label, depth) => depth === 0 ? label : `${'  '.repeat(depth - 1)}└─ ${label}`).join('\n');
+		}
+		for (const parent of dependencies.get(node) ?? []) {
+			if (!visited.has(parent)) {
+				visited.add(parent);
+				queue.push([...chain, parent]);
+			}
+		}
+	}
+	return undefined;
 }
 
 function escapeMarkdown(value: string): string {
