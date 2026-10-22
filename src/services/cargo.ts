@@ -44,7 +44,15 @@ export class CargoService {
 	}
 
 	async inverseTree(root: string, packageName: string, version: string): Promise<string> {
-		return this.runText(root, ['tree', '--invert', `${packageName}@${version}`, '--prefix', 'depth']);
+		const specification = `${packageName}@${version}`;
+		try {
+			return await this.runText(root, ['tree', '--invert', specification, '--prefix', 'depth']);
+		} catch (error) {
+			if (error instanceof CargoCommandError && error.message.includes(`error: package ID specification \`${specification}\` did not match any packages`)) {
+				return '';
+			}
+			throw error;
+		}
 	}
 
 	async workspaceRoot(root: string): Promise<string> {

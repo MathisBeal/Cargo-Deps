@@ -9,6 +9,8 @@ Extension VS Code pour consulter l'etat des dependances Rust directement dans `C
 - Analyse automatique de tous les `Cargo.toml` du workspace au demarrage, meme fermes, puis apres sauvegarde, ajout ou suppression d'un manifeste. Les dossiers `target`, `node_modules` et `.git` sont exclus.
 - Diagnostics Information pour les mises a jour et Warning pour les avis RustSec, y compris transitifs, dans l'editeur et le panneau Problemes. Les couleurs dependent du theme VS Code; les compteurs de la barre d'etat affichent les erreurs et avertissements, pas necessairement les informations.
 - Audit partage par workspace pendant chaque scan et cache pour les reponses crates.io. Les commandes Cargo ne sont executees que dans un workspace approuve.
+- Indicateur Cargo Deps dans la barre d'etat : spinner pendant l'analyse, manifeste et etape en cours. Le survol detaille les etapes paralleles, terminees ou ignorees, les crates et URL actives, les compteurs HTTP et cache, et les erreurs eventuelles. Un clic relance le rafraichissement du workspace, ou ouvre les logs si l'analyse a des erreurs.
+- Canal Output `Cargo Deps` avec les etapes et erreurs completes, accessible via `Cargo Deps: Show Output` et le lien du survol. Les logs sont conserves entre les rafraichissements; ils peuvent contenir des chemins locaux, a verifier avant de les partager.
 - Rafraichissement manuel via `Cargo Deps: Refresh Dependency Analysis` dans la palette de commandes.
 
 ## Prerequis

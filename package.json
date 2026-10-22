@@ -25,6 +25,10 @@
       {
         "command": "cargo-deps.refresh",
         "title": "Cargo Deps: Refresh Dependency Analysis"
+      },
+      {
+        "command": "cargo-deps.showOutput",
+        "title": "Cargo Deps: Show Output"
       }
     ]
   },
