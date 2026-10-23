@@ -6,11 +6,15 @@ import { DependencyAnalysisService } from './services/analysis';
 import { CargoHintsProvider } from './providers/hintsProvider';
 import { CargoHoverProvider } from './providers/hoverProvider';
 import { buildDiagnostics } from './providers/diagnosticsProvider';
+import { AnalysisStatusBar } from './providers/statusBar';
+import { AnalysisOutput } from './providers/output';
 
 // This method is called when your extension is activated
 // Your extension is activated the very first time the command is executed
 export function activate(context: vscode.ExtensionContext) {
 	const analysis = new DependencyAnalysisService();
+	const output = new AnalysisOutput(analysis.onDidProgress);
+	const statusBar = new AnalysisStatusBar(analysis.onDidProgress);
 	const selector: vscode.DocumentSelector = { scheme: 'file', pattern: '**/Cargo.toml' };
 	const diagnostics = vscode.languages.createDiagnosticCollection('cargo-deps');
 	const manifestsWatcher = vscode.workspace.createFileSystemWatcher('**/Cargo.toml');
@@ -31,6 +35,7 @@ export function activate(context: vscode.ExtensionContext) {
 						if (!vscode.workspace.isTrusted || disposed) {
 							return;
 						}
+						statusBar.discover();
 						const manifests = await vscode.workspace.findFiles('**/Cargo.toml', '**/{target,node_modules,.git}/**');
 						const openManifests = vscode.workspace.textDocuments.filter(isCargoManifest).map(document => document.uri);
 						const nextRoots = new Set([...manifests, ...openManifests].map(uri => path.dirname(uri.fsPath)));
@@ -44,6 +49,8 @@ export function activate(context: vscode.ExtensionContext) {
 						await analysis.refreshAll([...roots]);
 					} while (scanRequested && !disposed);
 				} catch (error) {
+					output.error('Workspace scan failed.', error);
+					statusBar.fail(error instanceof Error ? error.message : String(error));
 					void vscode.window.showWarningMessage(`Cargo dependency analysis failed: ${error instanceof Error ? error.message : String(error)}`);
 				} finally {
 					scanRunning = undefined;
@@ -54,6 +61,8 @@ export function activate(context: vscode.ExtensionContext) {
 	};
 	context.subscriptions.push(
 		analysis,
+		output,
+		statusBar,
 		diagnostics,
 		manifestsWatcher,
 		{ dispose: () => { disposed = true; } },
@@ -87,6 +96,7 @@ export function activate(context: vscode.ExtensionContext) {
 			diagnostics.delete(uri);
 			void refreshWorkspace();
 		}),
+		vscode.commands.registerCommand('cargo-deps.showOutput', () => output.show()),
 		vscode.commands.registerCommand('cargo-deps.refresh', async () => {
 			if (!vscode.workspace.isTrusted) {
 				void vscode.window.showWarningMessage('Trust this workspace to run Cargo dependency analysis.');
