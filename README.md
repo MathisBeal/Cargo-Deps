@@ -29,3 +29,60 @@ pnpm install
 pnpm run compile
 pnpm test
 ```
+
+Node.js 24 et la version de pnpm indiquee dans `package.json` sont utilises en CI.
+Les tests lancent une instance de VS Code; sous Linux sans affichage, utiliser
+`xvfb-run -a pnpm test`. Cargo doit etre disponible pour le test d'integration
+des workspaces.
+
+## CI et releases
+
+- Chaque PR et chaque push sur `develop` verifient le typage TypeScript, ESLint,
+  les outils de release et la creation d'un VSIX de production. Les tests de
+  l'extension tournent dans VS Code sur Linux, Windows et macOS.
+- Le VSIX est aussi disponible dans l'artefact `extension-vsix` du run Actions
+  pendant 14 jours, y compris pour les PR.
+- Chaque push sur `main` (merge de PR ou push direct) relance tous les controles
+  puis cree une release GitHub avec le tag `v<version>`, la date UTC, les notes
+  extraites du changelog, un lien vers le diff depuis la version precedente,
+  le VSIX teste et son empreinte SHA-256. Le tag pointe sur le commit exact du run.
+- Aucune publication automatique sur le Marketplace et aucun PAT ne sont
+  necessaires : telecharger le VSIX depuis la release pour le publier manuellement.
+  Seul le job de publication dispose du droit `contents: write`.
+
+### Preparer une PR vers main
+
+1. Augmenter `version` dans `package.json` avec une version stable
+   `majeure.mineure.correctif`, strictement superieure aux tags `v*` existants.
+2. Deplacer les notes de `## Unreleased` sous un nouveau titre `## <version>`
+   dans `CHANGELOG.md`. Cette section doit etre la premiere section versionnee,
+   unique et non vide; `Unreleased` peut rester present, mais vide.
+3. Verifier localement :
+
+   ```sh
+   git fetch origin --tags
+   pnpm run test:release
+   pnpm run release:check --new-version
+   pnpm run package:vsix
+   ```
+
+Par exemple, apres `v0.1.0`, preparer `"version": "0.1.1"` et une section
+`## 0.1.1` contenant les changements a publier. La CI d'une PR vers `main`
+refuse une version deja taguee, un retour de version ou des notes restees dans
+`Unreleased`. Les PR vers `develop` peuvent conserver la version courante.
+La date est ajoutee lors de la publication, sans modifier les sources.
+
+### Configuration GitHub
+
+Dans les regles de protection de `main` et `develop`, rendre le check
+`CI required` obligatoire et interdire les pushes directs/force-pushes sur
+`main`. Un workflow seul ne peut pas imposer ces regles de protection.
+Autoriser egalement GitHub Actions dans les parametres du depot.
+
+En cas d'echec transitoire avant publication, relancer le workflow `Release`
+avec **Run workflow**, en selectionnant `main`, ou relancer le run en echec.
+Une version deja taguee est volontairement refusee : les releases publiees
+ne sont ni ecrasees ni remplacees. Un echec de publication doit etre verifie
+avant toute nouvelle tentative si un tag ou une release a deja ete cree.
+Les actions sont epinglees par SHA et Dependabot propose leur mise a jour
+hebdomadaire vers `develop`.

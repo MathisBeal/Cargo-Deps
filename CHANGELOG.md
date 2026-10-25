@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Add cross-platform CI, production VSIX artifacts and version-checked GitHub releases with dated changelog notes and source comparisons.
 - Add a status bar progress indicator with current manifest and analysis stage.
 - Show parallel Cargo tasks, active dependency traces, crate lookups, HTTP progress, cache hits and partial failures in the status tooltip.
 - Refresh the workspace by clicking the status item, or open the output log when errors occur.

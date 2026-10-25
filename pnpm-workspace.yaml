@@ -1,2 +1,4 @@
 allowBuilds:
   esbuild: true
+  # Unsigned VSIX packaging does not need the signing tool's install script.
+  '@vscode/vsce-sign': false
