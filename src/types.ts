@@ -3,6 +3,7 @@ export interface Dependency {
 	packageName: string;
 	versionRequirement: string;
 	localPath?: string;
+	versionRange?: { start: number; end: number };
 	line: number;
 }
 

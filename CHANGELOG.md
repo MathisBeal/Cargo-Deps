@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Add clickable release versions in dependency hovers, per-crate quick fixes and commands to update open manifests or all workspace manifests, preserving other dependency options.
+
 - Add cross-platform CI, production VSIX artifacts and version-checked GitHub releases with dated changelog notes and source comparisons.
 - Add a status bar progress indicator with current manifest and analysis stage.
 - Show parallel Cargo tasks, active dependency traces, crate lookups, HTTP progress, cache hits and partial failures in the status tooltip.

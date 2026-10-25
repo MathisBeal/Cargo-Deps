@@ -3,32 +3,41 @@ import * as path from 'node:path';
 import { DependencyAnalysisService } from '../services/analysis';
 import type { DependencyHealth } from '../types';
 import { isOutdated } from './hintsProvider';
+import { documentHealth, selectionFor, SET_VERSION_COMMAND, versionEdit } from '../services/updates';
 
 export class CargoHoverProvider implements vscode.HoverProvider {
 	constructor(private readonly analysis: DependencyAnalysisService) {}
 
-	provideHover(document: vscode.TextDocument, position: vscode.Position): vscode.Hover | undefined {
+	async provideHover(document: vscode.TextDocument, position: vscode.Position): Promise<vscode.Hover | undefined> {
 		if (path.basename(document.uri.fsPath) !== 'Cargo.toml') {
 			return undefined;
 		}
 
-		const root = path.dirname(document.uri.fsPath);
-		const health = this.analysis.getSnapshot(root)?.dependencies.find(item => item.dependency.line === position.line);
-		if (!health) {
+		const documentVersion = document.version;
+		const health = (await documentHealth(document, this.analysis)).find(item => item.dependency.line === position.line
+			|| (item.dependency.versionRange && document.positionAt(item.dependency.versionRange.start).line === position.line));
+		if (!health || document.version !== documentVersion) {
 			return undefined;
 		}
 
-		return new vscode.Hover(buildHover(health), document.lineAt(position.line).range);
+		return new vscode.Hover(buildHover(health, document), document.lineAt(position.line).range);
 	}
 }
 
-function buildHover(health: DependencyHealth): vscode.MarkdownString {
+function buildHover(health: DependencyHealth, document: vscode.TextDocument): vscode.MarkdownString {
 	const { dependency, installedVersion, latestVersion, advisories, versions } = health;
 	const isLocal = Boolean(dependency.localPath);
 	const markdown = new vscode.MarkdownString();
-	markdown.isTrusted = false;
+	markdown.isTrusted = { enabledCommands: [SET_VERSION_COMMAND] };
+	const versionLabel = (version: string) => {
+		if (!vscode.workspace.isTrusted || !versionEdit(document, health, version)) {
+			return inlineCode(version);
+		}
+		const args = encodeURIComponent(JSON.stringify([selectionFor(document, health, version)]));
+		return `[${inlineCode(version)}](command:${SET_VERSION_COMMAND}?${args} "Use this version")`;
+	};
 	markdown.appendMarkdown(`### ${escapeMarkdown(dependency.name)}\n\n`);
-	markdown.appendMarkdown(`Installed: ${inlineCode(installedVersion || dependency.versionRequirement)} · Latest: ${inlineCode(isLocal ? 'local' : latestVersion || 'unknown')}\n\n`);
+	markdown.appendMarkdown(`Installed: ${inlineCode(installedVersion || dependency.versionRequirement)} · Latest: ${isLocal ? inlineCode('local') : latestVersion ? versionLabel(latestVersion) : inlineCode('unknown')}\n\n`);
 	markdown.appendMarkdown(`**Status:** ${isLocal ? `Local path dependency (${inlineCode(dependency.localPath ?? '')})` : isOutdated(installedVersion, latestVersion) ? 'Update available' : 'Up to date or unknown'}\n\n`);
 
 	markdown.appendMarkdown('#### Security advisories & warnings\n');
@@ -65,7 +74,7 @@ function buildHover(health: DependencyHealth): vscode.MarkdownString {
 				version.number === installedVersion ? 'installed' : '',
 				version.yanked ? 'yanked' : '',
 			].filter(Boolean);
-			markdown.appendMarkdown(`- ${inlineCode(version.number)}${labels.length ? ` (${labels.join(', ')})` : ''}\n`);
+			markdown.appendMarkdown(`- ${version.yanked ? inlineCode(version.number) : versionLabel(version.number)}${labels.length ? ` (${labels.join(', ')})` : ''}\n`);
 		}
 	}
 	return markdown;
