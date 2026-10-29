@@ -30,6 +30,14 @@
       {
         "command": "cargo-deps.showOutput",
         "title": "Cargo Deps: Show Output"
+      },
+      {
+        "command": "cargo-deps.updateOpen",
+        "title": "Cargo Deps: Update Open Manifests to Latest"
+      },
+      {
+        "command": "cargo-deps.updateAll",
+        "title": "Cargo Deps: Update All Workspace Manifests to Latest"
       }
     ]
   },
