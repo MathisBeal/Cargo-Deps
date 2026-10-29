@@ -1,4 +1,5 @@
 import type { CrateReleaseInfo, PublishedVersion } from '../types';
+import type { CratesIoProgress } from './progress';
 
 const CACHE_DURATION_MS = 10 * 60 * 1000;
 
@@ -11,18 +12,21 @@ export class CratesIoService {
 	private readonly cache = new Map<string, CacheEntry>();
 	private readonly requests = new Map<string, Promise<CrateReleaseInfo>>();
 
-	async getReleaseInfo(crateName: string): Promise<CrateReleaseInfo> {
+	async getReleaseInfo(crateName: string, report?: (event: CratesIoProgress) => void): Promise<CrateReleaseInfo> {
 		const cached = this.cache.get(crateName);
 		if (cached && cached.expiresAt > Date.now()) {
+			report?.({ kind: 'cache' });
 			return cached.value;
 		}
 
 		const pending = this.requests.get(crateName);
 		if (pending) {
+			report?.({ kind: 'shared' });
 			return pending;
 		}
 
-		const request = this.fetchReleaseInfo(crateName);
+		report?.({ kind: 'fetch', total: 2 });
+		const request = this.fetchReleaseInfo(crateName, report);
 		this.requests.set(crateName, request);
 		try {
 			const value = await request;
@@ -33,13 +37,21 @@ export class CratesIoService {
 		}
 	}
 
-	private async fetchReleaseInfo(crateName: string): Promise<CrateReleaseInfo> {
+	private async fetchReleaseInfo(crateName: string, report?: (event: CratesIoProgress) => void): Promise<CrateReleaseInfo> {
 		const crateUrl = `https://crates.io/api/v1/crates/${encodeURIComponent(crateName)}`;
-		const [crateData, versionData] = await Promise.all([
-			this.fetchJson(crateUrl) as Promise<{ crate?: { max_version?: unknown; max_stable_version?: unknown } }>,
-			this.fetchJson(`${crateUrl}/versions?per_page=10`) as Promise<{ versions?: unknown }>,
+		const results = await Promise.allSettled([
+			this.fetchJson(crateUrl, report),
+			this.fetchJson(`${crateUrl}/versions?per_page=10`, report),
 		]);
-		const data = versionData;
+		const [crateResult, versionResult] = results;
+		if (crateResult.status === 'rejected') {
+			throw crateResult.reason;
+		}
+		if (versionResult.status === 'rejected') {
+			throw versionResult.reason;
+		}
+		const crateData = crateResult.value as { crate?: { max_version?: unknown; max_stable_version?: unknown } };
+		const data = versionResult.value as { versions?: unknown };
 		const versions = Array.isArray(data.versions)
 			? data.versions.flatMap(value => {
 				if (!value || typeof value !== 'object') {
@@ -67,14 +79,25 @@ export class CratesIoService {
 		};
 	}
 
-	private async fetchJson(url: string): Promise<unknown> {
-		const response = await fetch(url, {
-			headers: { 'User-Agent': 'cargo-deps VS Code extension' },
-			signal: AbortSignal.timeout(15_000),
-		});
-		if (!response.ok) {
-			throw new Error(`crates.io returned HTTP ${response.status}`);
+	private async fetchJson(url: string, report?: (event: CratesIoProgress) => void): Promise<unknown> {
+		report?.({ kind: 'request', url, status: 'running' });
+		try {
+			const response = await fetch(url, {
+				headers: { 'User-Agent': 'cargo-deps VS Code extension' },
+				signal: AbortSignal.timeout(15_000),
+			});
+			if (!response.ok) {
+				const body = await response.text();
+				throw new Error(`crates.io returned HTTP ${response.status}${body ? `\n${body}` : ''}`);
+			}
+			const data: unknown = await response.json();
+			report?.({ kind: 'request', url, status: 'completed' });
+			return data;
+		} catch (error) {
+			report?.({ kind: 'request', url, status: 'failed' });
+			const message = error instanceof Error ? error.message : String(error);
+			const cause = error instanceof Error && error.cause instanceof Error ? `\nCaused by: ${error.cause.message}` : '';
+			throw new Error(`GET ${url}: ${message}${cause}`, { cause: error });
 		}
-		return response.json() as Promise<unknown>;
 	}
 }

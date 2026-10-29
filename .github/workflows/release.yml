@@ -1,0 +1,64 @@
+name: Release
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.sha }}
+  cancel-in-progress: false
+
+jobs:
+  checks:
+    name: Pre-release checks
+    uses: ./.github/workflows/ci.yml
+    with:
+      release-validation: true
+
+  publish:
+    name: Publish GitHub release
+    needs: checks
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: '24'
+      - name: Download the verified VSIX
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+        with:
+          name: extension-vsix
+          path: release-assets
+      - name: Prepare dated release notes from the changelog
+        run: node scripts/release.mjs prepare
+      - name: Publish release, tag and downloadable VSIX
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          VERSION="$(node -p 'require("./package.json").version')"
+          NAME="$(node -p 'require("./package.json").name')"
+          VSIX="release-assets/$NAME-$VERSION.vsix"
+          test -s "$VSIX"
+          (cd release-assets && sha256sum "$NAME-$VERSION.vsix" > "$NAME-$VERSION.vsix.sha256")
+          gh release create "v$VERSION" \
+            "$VSIX" "$VSIX.sha256" \
+            --target "$GITHUB_SHA" \
+            --title "Cargo-Deps v$VERSION ($(date -u +%F))" \
+            --notes-file release-notes.md \
+            --latest
+          {
+            cat release-notes.md
+            printf '\n**Release:** https://github.com/%s/releases/tag/v%s\n' "$GITHUB_REPOSITORY" "$VERSION"
+          } >> "$GITHUB_STEP_SUMMARY"

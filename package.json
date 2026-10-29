@@ -7,8 +7,9 @@
     "type": "git",
     "url": "https://github.com/MathisBeal/Cargo-Deps.git"
   },
-  "version": "0.1.0",
+  "version": "0.2.0",
   "license": "MIT",
+  "packageManager": "pnpm@12.11.2",
   "engines": {
     "vscode": "^1.140.0"
   },
@@ -25,20 +26,35 @@
       {
         "command": "cargo-deps.refresh",
         "title": "Cargo Deps: Refresh Dependency Analysis"
+      },
+      {
+        "command": "cargo-deps.showOutput",
+        "title": "Cargo Deps: Show Output"
+      },
+      {
+        "command": "cargo-deps.updateOpen",
+        "title": "Cargo Deps: Update Open Manifests to Latest"
+      },
+      {
+        "command": "cargo-deps.updateAll",
+        "title": "Cargo Deps: Update All Workspace Manifests to Latest"
       }
     ]
   },
   "scripts": {
     "vscode:prepublish": "pnpm run package",
-    "dev": "pnpm run compile && code --new-window --extensionDevelopmentPath=.",
+    "dev": "pnpm run compile && code --new-window --extensionDevelopmentPath=\"$PWD\"",
     "compile": "pnpm run check-types && pnpm run lint && node esbuild.js",
     "watch": "npm-run-all -p watch:*",
     "watch:esbuild": "node esbuild.js --watch",
     "watch:tsc": "tsc --noEmit --watch --project tsconfig.json",
     "package": "pnpm run check-types && pnpm run lint && node esbuild.js --production",
+    "package:vsix": "vsce package --no-dependencies",
+    "test:release": "node --test scripts/release.test.mjs",
+    "release:check": "node scripts/release.mjs check",
     "compile-tests": "tsc -p . --outDir out",
     "watch-tests": "tsc -p . -w --outDir out",
-    "pretest": "pnpm run compile-tests && pnpm run compile && pnpm run lint",
+    "pretest": "pnpm run compile-tests && pnpm run compile",
     "check-types": "tsc --noEmit",
     "lint": "eslint src",
     "test": "vscode-test"
@@ -49,6 +65,7 @@
     "@types/vscode": "^1.140.0",
     "@vscode/test-cli": "^0.0.15",
     "@vscode/test-electron": "^3.0.0",
+    "@vscode/vsce": "4.0.0",
     "esbuild": "^0.28.1",
     "eslint": "^10.5.0",
     "npm-run-all": "^4.1.5",

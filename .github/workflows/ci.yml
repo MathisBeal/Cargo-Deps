@@ -1,0 +1,84 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [develop]
+  workflow_call:
+    inputs:
+      release-validation:
+        description: Require a new version ready for publication.
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: checks-${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  quality:
+    name: Quality and VSIX
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: ./.github/actions/setup
+      - name: Test release tooling
+        run: pnpm run test:release
+      - name: Validate manifest and changelog
+        run: pnpm run release:check
+      - name: Validate new release version
+        if: inputs.release-validation || github.base_ref == 'main'
+        run: pnpm run release:check --new-version
+      - name: Type-check, lint and package production VSIX
+        run: pnpm run package:vsix
+      - name: Upload installable VSIX
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: extension-vsix
+          path: '*.vsix'
+          if-no-files-found: error
+          retention-days: 14
+
+  tests:
+    name: Extension tests (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup
+      - name: Verify Cargo is available for integration tests
+        run: cargo --version
+      - name: Test extension in VS Code (Linux)
+        if: runner.os == 'Linux'
+        run: xvfb-run -a pnpm test --fail-zero --forbid-only
+      - name: Test extension in VS Code (Windows and macOS)
+        if: runner.os != 'Linux'
+        run: pnpm test --fail-zero --forbid-only
+
+  required:
+    name: CI required
+    if: always()
+    needs: [quality, tests]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Require every check to succeed
+        env:
+          QUALITY_RESULT: ${{ needs.quality.result }}
+          TESTS_RESULT: ${{ needs.tests.result }}
+        run: |
+          test "$QUALITY_RESULT" = success
+          test "$TESTS_RESULT" = success

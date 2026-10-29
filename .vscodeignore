@@ -16,3 +16,6 @@ PROMPT.md
 pnpm-lock.yaml
 pnpm-workspace.yaml
 **/*.vsix
+.github/**
+scripts/**
+.npmrc
