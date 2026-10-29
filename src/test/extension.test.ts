@@ -16,6 +16,7 @@ import { AnalysisProgressTracker } from '../services/progress';
 import type { AnalysisProgress, CratesIoProgress } from '../services/progress';
 import type { CargoAuditEntry } from '../types';
 import { AnalysisOutput } from '../providers/output';
+import { SET_VERSION_COMMAND } from '../services/updates';
 
 function deferred<Value>() {
 	let resolve!: (value: Value | PromiseLike<Value>) => void;
@@ -663,5 +664,18 @@ suite('Extension Test Suite', () => {
 			{ crate_name: 'demo_app', dependencies: [{ name: 'serialport', project: '4.9.0', latest: '4.10.1' }] },
 			{ crate_name: 'driver_commons', dependencies: [{ name: 'serialport', project: '4.9.0', latest: '4.10.1' }] },
 		]);
+	});
+
+	test('contributes both bulk update commands to the F1 command palette', async () => {
+		const extension = vscode.extensions.getExtension('MathisBEAL.cargo-deps');
+		assert.ok(extension);
+		assert.ok(!vscode.workspace.textDocuments.some(document => path.basename(document.uri.fsPath) === 'Cargo.toml'));
+		await extension.activate();
+		const commands = await vscode.commands.getCommands(true);
+		for (const command of ['cargo-deps.updateOpen', 'cargo-deps.updateAll']) {
+			assert.ok(commands.includes(command));
+			assert.ok(extension.packageJSON.contributes.commands.some((item: { command: string }) => item.command === command));
+		}
+		assert.ok(commands.includes(SET_VERSION_COMMAND));
 	});
 });

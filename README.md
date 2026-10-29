@@ -39,6 +39,10 @@ Node.js 24 et la version de pnpm indiquee dans `package.json` sont utilises en C
 Les tests lancent une instance de VS Code; sous Linux sans affichage, utiliser
 `xvfb-run -a pnpm test`. Cargo doit etre disponible pour le test d'integration
 des workspaces.
+Les suites `extension` et `updates` utilisent des instances VS Code separees :
+le test d'activation ne doit pas lancer de vrais scans Cargo sur les manifestes
+temporaires des tests de providers. Pour cibler une suite, utiliser
+`pnpm test --label updates` ou `pnpm test --label extension`.
 
 ## CI et releases
 

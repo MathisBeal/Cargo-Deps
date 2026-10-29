@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Fix Windows test snapshot keys to match URI-normalized paths and isolate extension activation from temporary provider fixtures.
+
 - Add clickable release versions in dependency hovers, per-crate quick fixes and commands to update open manifests or all workspace manifests, preserving other dependency options.
 
 - Add cross-platform CI, production VSIX artifacts and version-checked GitHub releases with dated changelog notes and source comparisons.

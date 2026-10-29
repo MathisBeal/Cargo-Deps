@@ -22,8 +22,16 @@ function healthFor(dependency: DependencyHealth['dependency']): DependencyHealth
 }
 
 class TestAnalysis extends DependencyAnalysisService {
-	readonly snapshotsForTest = new Map<string, AnalysisSnapshot>();
+	private readonly snapshotsForTest = new Map<string, AnalysisSnapshot>();
 	override getSnapshot(root: string) { return this.snapshotsForTest.get(root); }
+
+	async addManifest(root: string, contents: string) {
+		// Match the URI-derived roots used by the providers, including Windows drive casing.
+		root = vscode.Uri.file(root).fsPath;
+		const dependencies = (await parseDependencies(contents)).map(healthFor);
+		this.snapshotsForTest.set(root, { root, contents, dependencies, updatedAt: 0 });
+		return dependencies;
+	}
 }
 
 suite('Dependency version updates', () => {
@@ -34,16 +42,43 @@ suite('Dependency version updates', () => {
 		roots.push(root);
 		const uri = vscode.Uri.file(path.join(root, 'Cargo.toml'));
 		await writeFile(uri.fsPath, contents);
-		const dependencies = (await parseDependencies(contents)).map(healthFor);
-		analysis.snapshotsForTest.set(root, { root, contents, dependencies, updatedAt: 0 });
+		const dependencies = await analysis.addManifest(root, contents);
 		return { uri, document: await vscode.workspace.openTextDocument(uri), dependencies };
 	}
 	suiteTeardown(async () => {
+		assert.equal(vscode.extensions.getExtension('MathisBEAL.cargo-deps')?.isActive, false,
+			'Provider tests must not activate real Cargo scans over their temporary manifests');
 		analysis.dispose();
 		for (const root of roots) {
 			await rm(root, { recursive: true, force: true });
 		}
 	});
+
+	test('finds snapshots by URI-normalized roots, including uppercase Windows drive letters', async () => {
+		const root = 'C:/Users/runner/AppData/Local/Temp/cargo-deps-path-test';
+		const uri = vscode.Uri.file(`${root}/Cargo.toml`);
+		const contents = '[dependencies]\nserde = "1.0"';
+		const dependencies = await analysis.addManifest(root, contents);
+		const snapshot = analysis.getSnapshot(path.dirname(uri.fsPath));
+		assert.ok(snapshot, `Snapshot missing for URI path ${uri.fsPath} (native root: ${root})`);
+		assert.equal(snapshot.root, path.dirname(uri.fsPath));
+		assert.strictEqual(snapshot.dependencies, dependencies);
+	});
+
+	for (const eol of ['\n', '\r\n']) {
+		test(`shares snapshot lookup across quick fixes, hovers and bulk updates with ${eol === '\n' ? 'LF' : 'CRLF'}`, async () => {
+			const contents = ['[dependencies]', 'serde = "1.0"'].join(eol);
+			const { document, dependencies } = await manifest(contents);
+			assert.equal(document.getText(), contents);
+			assert.strictEqual(await documentHealth(document, analysis), dependencies);
+			assert.equal(dependencies[0].dependency.line, 1);
+			const actions = await new CargoCodeActionsProvider(analysis).provideCodeActions(document, new vscode.Range(1, 0, 1, 1));
+			assert.equal(actions.length, 2);
+			assert.ok(await new CargoHoverProvider(analysis).provideHover(document, new vscode.Position(1, 0)));
+			await updateManifests(analysis, [document.uri]);
+			assert.equal(document.getText(), ['[dependencies]', 'serde = "2.0.0"'].join(eol));
+		});
+	}
 
 	test('locates only version strings across TOML forms, preserving comments and options', async () => {
 		const contents = [
@@ -144,10 +179,7 @@ suite('Dependency version updates', () => {
 		const thirdUri = vscode.Uri.file(path.join(thirdRoot, 'Cargo.toml'));
 		const thirdContents = '[dev-dependencies]\nserde = "1.0"';
 		await writeFile(thirdUri.fsPath, thirdContents);
-		analysis.snapshotsForTest.set(thirdRoot, {
-			root: thirdRoot, contents: thirdContents, updatedAt: 0,
-			dependencies: (await parseDependencies(thirdContents)).map(healthFor),
-		});
+		await analysis.addManifest(thirdRoot, thirdContents);
 		assert.ok(!vscode.workspace.textDocuments.some(document => document.uri.toString() === thirdUri.toString()));
 		await updateManifests(analysis, [first.uri]);
 		assert.equal(first.document.getText(), '[dependencies]\nserde = "2.0.0"');
@@ -174,17 +206,5 @@ suite('Dependency version updates', () => {
 				assert.ok(versionEdit(document, dependencies[0], '2.0.0'));
 			}
 		}
-	});
-
-	test('contributes both bulk update commands to the F1 command palette', async () => {
-		const extension = vscode.extensions.getExtension('MathisBEAL.cargo-deps');
-		assert.ok(extension);
-		await extension.activate();
-		const commands = await vscode.commands.getCommands(true);
-		for (const command of ['cargo-deps.updateOpen', 'cargo-deps.updateAll']) {
-			assert.ok(commands.includes(command));
-			assert.ok(extension.packageJSON.contributes.commands.some((item: { command: string }) => item.command === command));
-		}
-		assert.ok(commands.includes(SET_VERSION_COMMAND));
 	});
 });
