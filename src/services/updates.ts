@@ -26,7 +26,7 @@ export async function documentHealth(document: vscode.TextDocument, analysis: De
 	if (snapshot.contents === document.getText()) {
 		return snapshot.dependencies;
 	}
-	const dependencies = await parseDependencies(document.getText());
+	const dependencies = await parseDependencies(document.getText(), snapshot.workspaceDependencies);
 	return dependencies.flatMap(dependency => {
 		const previous = snapshot.dependencies.find(item => item.dependency.name === dependency.name && item.dependency.packageName === dependency.packageName);
 		return previous ? [{ ...previous, dependency }] : [];

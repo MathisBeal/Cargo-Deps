@@ -4,6 +4,7 @@ import { DependencyAnalysisService } from '../services/analysis';
 import type { DependencyHealth } from '../types';
 import { isOutdated } from './hintsProvider';
 import { documentHealth, selectionFor, SET_VERSION_COMMAND, versionEdit } from '../services/updates';
+import { isCratesIoDependency } from '../services/manifest';
 
 export class CargoHoverProvider implements vscode.HoverProvider {
 	constructor(private readonly analysis: DependencyAnalysisService) {}
@@ -27,6 +28,8 @@ export class CargoHoverProvider implements vscode.HoverProvider {
 function buildHover(health: DependencyHealth, document: vscode.TextDocument): vscode.MarkdownString {
 	const { dependency, installedVersion, latestVersion, advisories, versions } = health;
 	const isLocal = Boolean(dependency.localPath);
+	const registryDependency = isCratesIoDependency(dependency);
+	const sourceLabel = isLocal ? 'local' : dependency.git ? 'Git' : `registry: ${dependency.registry}`;
 	const markdown = new vscode.MarkdownString();
 	markdown.isTrusted = { enabledCommands: [SET_VERSION_COMMAND] };
 	const versionLabel = (version: string) => {
@@ -37,11 +40,13 @@ function buildHover(health: DependencyHealth, document: vscode.TextDocument): vs
 		return `[${inlineCode(version)}](command:${SET_VERSION_COMMAND}?${args} "Use this version")`;
 	};
 	markdown.appendMarkdown(`### ${escapeMarkdown(dependency.name)}\n\n`);
-	markdown.appendMarkdown(`Installed: ${inlineCode(installedVersion || dependency.versionRequirement)} · Latest: ${isLocal ? inlineCode('local') : latestVersion ? versionLabel(latestVersion) : inlineCode('unknown')}\n\n`);
-	markdown.appendMarkdown(`**Status:** ${isLocal ? `Local path dependency (${inlineCode(dependency.localPath ?? '')})` : isOutdated(installedVersion, latestVersion) ? 'Update available' : 'Up to date or unknown'}\n\n`);
+	markdown.appendMarkdown(`Installed: ${inlineCode(installedVersion || dependency.versionRequirement)} · Latest: ${!registryDependency ? inlineCode(sourceLabel) : latestVersion ? versionLabel(latestVersion) : inlineCode('unknown')}\n\n`);
+	markdown.appendMarkdown(`**Status:** ${isLocal ? `Local path dependency (${inlineCode(dependency.localPath ?? '')})` : !registryDependency ? 'Not checked on crates.io' : isOutdated(installedVersion, latestVersion) ? 'Update available' : 'Up to date or unknown'}\n\n`);
 
 	markdown.appendMarkdown('#### Security advisories & warnings\n');
-	if (advisories.length === 0) {
+	if (health.auditAvailable === false) {
+		markdown.appendMarkdown('Security analysis unavailable: `cargo audit` failed. See Cargo Deps output for details.\n');
+	} else if (advisories.length === 0) {
 		markdown.appendMarkdown('No known vulnerabilities reported by `cargo audit`.\n');
 	} else {
 		for (const advisory of advisories) {
@@ -63,8 +68,8 @@ function buildHover(health: DependencyHealth, document: vscode.TextDocument): vs
 	}
 
 	markdown.appendMarkdown('\n#### Recent releases\n');
-	if (isLocal) {
-		markdown.appendMarkdown('Local dependencies do not use crates.io release history.\n');
+	if (!registryDependency) {
+		markdown.appendMarkdown('Release history is not checked on crates.io for this dependency source.\n');
 	} else if (versions.length === 0) {
 		markdown.appendMarkdown('Release history unavailable.\n');
 	} else {

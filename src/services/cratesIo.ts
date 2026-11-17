@@ -2,6 +2,7 @@ import type { CrateReleaseInfo, PublishedVersion } from '../types';
 import type { CratesIoProgress } from './progress';
 
 const CACHE_DURATION_MS = 10 * 60 * 1000;
+const MAX_CONCURRENT_REQUESTS = 6;
 
 interface CacheEntry {
 	value: CrateReleaseInfo;
@@ -10,9 +11,12 @@ interface CacheEntry {
 
 export class CratesIoService {
 	private readonly cache = new Map<string, CacheEntry>();
-	private readonly requests = new Map<string, Promise<CrateReleaseInfo>>();
+	private readonly requests = new Map<string, { promise: Promise<CrateReleaseInfo>; signal?: AbortSignal }>();
+	private activeRequests = 0;
+	private readonly waitingRequests: Array<() => void> = [];
 
-	async getReleaseInfo(crateName: string, report?: (event: CratesIoProgress) => void): Promise<CrateReleaseInfo> {
+	async getReleaseInfo(crateName: string, report?: (event: CratesIoProgress) => void, signal?: AbortSignal): Promise<CrateReleaseInfo> {
+		signal?.throwIfAborted();
 		const cached = this.cache.get(crateName);
 		if (cached && cached.expiresAt > Date.now()) {
 			report?.({ kind: 'cache' });
@@ -20,29 +24,33 @@ export class CratesIoService {
 		}
 
 		const pending = this.requests.get(crateName);
-		if (pending) {
+		if (pending && pending.signal === signal) {
 			report?.({ kind: 'shared' });
-			return pending;
+			return pending.promise;
 		}
 
 		report?.({ kind: 'fetch', total: 2 });
-		const request = this.fetchReleaseInfo(crateName, report);
+		const request = { promise: this.fetchReleaseInfo(crateName, report, signal), signal };
 		this.requests.set(crateName, request);
 		try {
-			const value = await request;
+			const value = await request.promise;
+			signal?.throwIfAborted();
 			this.cache.set(crateName, { value, expiresAt: Date.now() + CACHE_DURATION_MS });
 			return value;
 		} finally {
-			this.requests.delete(crateName);
+			if (this.requests.get(crateName) === request) {
+				this.requests.delete(crateName);
+			}
 		}
 	}
 
-	private async fetchReleaseInfo(crateName: string, report?: (event: CratesIoProgress) => void): Promise<CrateReleaseInfo> {
+	private async fetchReleaseInfo(crateName: string, report?: (event: CratesIoProgress) => void, signal?: AbortSignal): Promise<CrateReleaseInfo> {
 		const crateUrl = `https://crates.io/api/v1/crates/${encodeURIComponent(crateName)}`;
 		const results = await Promise.allSettled([
-			this.fetchJson(crateUrl, report),
-			this.fetchJson(`${crateUrl}/versions?per_page=10`, report),
+			this.fetchJson(crateUrl, report, signal),
+			this.fetchJson(`${crateUrl}/versions?per_page=10`, report, signal),
 		]);
+		signal?.throwIfAborted();
 		const [crateResult, versionResult] = results;
 		if (crateResult.status === 'rejected') {
 			throw crateResult.reason;
@@ -79,25 +87,59 @@ export class CratesIoService {
 		};
 	}
 
-	private async fetchJson(url: string, report?: (event: CratesIoProgress) => void): Promise<unknown> {
-		report?.({ kind: 'request', url, status: 'running' });
+	private async acquireRequest(signal?: AbortSignal): Promise<void> {
+		signal?.throwIfAborted();
+		if (this.activeRequests >= MAX_CONCURRENT_REQUESTS) {
+			await new Promise<void>((resolve, reject) => {
+				const ready = () => {
+					signal?.removeEventListener('abort', abort);
+					resolve();
+				};
+				const abort = () => {
+					const index = this.waitingRequests.indexOf(ready);
+					if (index >= 0) {
+						this.waitingRequests.splice(index, 1);
+					}
+					reject(signal?.reason);
+				};
+				this.waitingRequests.push(ready);
+				signal?.addEventListener('abort', abort, { once: true });
+			});
+		} else {
+			this.activeRequests++;
+		}
+	}
+
+	private async fetchJson(url: string, report?: (event: CratesIoProgress) => void, signal?: AbortSignal): Promise<unknown> {
+		await this.acquireRequest(signal);
 		try {
+			signal?.throwIfAborted();
+			report?.({ kind: 'request', url, status: 'running' });
 			const response = await fetch(url, {
 				headers: { 'User-Agent': 'cargo-deps VS Code extension' },
-				signal: AbortSignal.timeout(15_000),
+				signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(15_000)]) : AbortSignal.timeout(15_000),
 			});
 			if (!response.ok) {
 				const body = await response.text();
 				throw new Error(`crates.io returned HTTP ${response.status}${body ? `\n${body}` : ''}`);
 			}
 			const data: unknown = await response.json();
+			signal?.throwIfAborted();
 			report?.({ kind: 'request', url, status: 'completed' });
 			return data;
 		} catch (error) {
+			signal?.throwIfAborted();
 			report?.({ kind: 'request', url, status: 'failed' });
 			const message = error instanceof Error ? error.message : String(error);
 			const cause = error instanceof Error && error.cause instanceof Error ? `\nCaused by: ${error.cause.message}` : '';
 			throw new Error(`GET ${url}: ${message}${cause}`, { cause: error });
+		} finally {
+			const next = this.waitingRequests.shift();
+			if (next) {
+				next();
+			} else {
+				this.activeRequests--;
+			}
 		}
 	}
 }
