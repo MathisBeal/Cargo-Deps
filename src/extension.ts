@@ -20,8 +20,9 @@ export function activate(context: vscode.ExtensionContext) {
 	const selector: vscode.DocumentSelector = { scheme: 'file', pattern: '**/Cargo.toml' };
 	const diagnostics = vscode.languages.createDiagnosticCollection('cargo-deps');
 	const manifestsWatcher = vscode.workspace.createFileSystemWatcher('**/Cargo.toml');
-	let scanRunning: Promise<void> | undefined;
-	let scanRequested = false;
+	let scanRunning: Promise<boolean> | undefined;
+	let scanController: AbortController | undefined;
+	let analysisHasErrors = false;
 	let disposed = false;
 	let roots = new Set<string>();
 	const runUpdate = async (operation: () => Promise<void>): Promise<void> => {
@@ -35,41 +36,53 @@ export function activate(context: vscode.ExtensionContext) {
 			void vscode.window.showErrorMessage(`Cargo dependency update failed: ${error instanceof Error ? error.message : String(error)}`);
 		}
 	};
-	const refreshWorkspace = (): Promise<void> => {
+	const refreshWorkspace = (): Promise<boolean> => {
 		if (!vscode.workspace.isTrusted || disposed) {
-			return Promise.resolve();
+			return Promise.resolve(false);
 		}
-		scanRequested = true;
-		if (!scanRunning) {
-			scanRunning = (async () => {
-				try {
-					do {
-						scanRequested = false;
-						if (!vscode.workspace.isTrusted || disposed) {
-							return;
-						}
-						statusBar.discover();
-						const manifests = await vscode.workspace.findFiles('**/Cargo.toml', '**/{target,node_modules,.git}/**');
-						const openManifests = vscode.workspace.textDocuments.filter(isCargoManifest).map(document => document.uri);
-						const nextRoots = new Set([...manifests, ...openManifests].map(uri => path.dirname(uri.fsPath)));
-						for (const root of roots) {
-							if (!nextRoots.has(root)) {
-								analysis.forget(root);
-								diagnostics.delete(vscode.Uri.file(path.join(root, 'Cargo.toml')));
-							}
-						}
-						roots = nextRoots;
-						await analysis.refreshAll([...roots]);
-					} while (scanRequested && !disposed);
-				} catch (error) {
-					output.error('Workspace scan failed.', error);
-					statusBar.fail(error instanceof Error ? error.message : String(error));
-					void vscode.window.showWarningMessage(`Cargo dependency analysis failed: ${error instanceof Error ? error.message : String(error)}`);
-				} finally {
+		scanController?.abort();
+		const controller = new AbortController();
+		scanController = controller;
+		const { signal } = controller;
+		const discovery = new vscode.CancellationTokenSource();
+		const cancelDiscovery = () => discovery.cancel();
+		signal.addEventListener('abort', cancelDiscovery, { once: true });
+		scanRunning = (async () => {
+			try {
+				analysisHasErrors = false;
+				statusBar.discover();
+				const manifests = await vscode.workspace.findFiles('**/Cargo.toml', '**/{target,node_modules,.git}/**', undefined, discovery.token);
+				signal.throwIfAborted();
+				const openManifests = vscode.workspace.textDocuments.filter(isCargoManifest).map(document => document.uri);
+				const nextRoots = new Set([...manifests, ...openManifests].map(uri => path.dirname(uri.fsPath)));
+				for (const root of roots) {
+					if (!nextRoots.has(root)) {
+						analysis.forget(root);
+						diagnostics.delete(vscode.Uri.file(path.join(root, 'Cargo.toml')));
+					}
+				}
+				roots = nextRoots;
+				await analysis.refreshAll([...roots], signal);
+				signal.throwIfAborted();
+				return true;
+			} catch (error) {
+				if (signal.aborted) {
+					return false;
+				}
+				analysisHasErrors = true;
+				output.error('Workspace scan failed.', error);
+				statusBar.fail(error instanceof Error ? error.message : String(error));
+				void vscode.window.showWarningMessage(`Cargo dependency analysis failed: ${error instanceof Error ? error.message : String(error)}`);
+				return false;
+			} finally {
+				signal.removeEventListener('abort', cancelDiscovery);
+				discovery.dispose();
+				if (scanController === controller) {
+					scanController = undefined;
 					scanRunning = undefined;
 				}
-			})();
-		}
+			}
+		})();
 		return scanRunning;
 	};
 	context.subscriptions.push(
@@ -78,7 +91,10 @@ export function activate(context: vscode.ExtensionContext) {
 		statusBar,
 		diagnostics,
 		manifestsWatcher,
-		{ dispose: () => { disposed = true; } },
+		{ dispose: () => { disposed = true; scanController?.abort(); } },
+		analysis.onDidProgress(progress => {
+			analysisHasErrors = progress.status === 'failed' || progress.errors.length > 0;
+		}),
 		analysis.onDidAnalyze(snapshot => {
 			if (!disposed && roots.has(snapshot.root)) {
 				diagnostics.set(vscode.Uri.file(path.join(snapshot.root, 'Cargo.toml')), buildDiagnostics(snapshot));
@@ -90,7 +106,8 @@ export function activate(context: vscode.ExtensionContext) {
 			providedCodeActionKinds: CargoCodeActionsProvider.providedCodeActionKinds,
 		}),
 		vscode.workspace.onDidOpenTextDocument(document => {
-			if (isCargoManifest(document) && !analysis.getSnapshot(path.dirname(document.uri.fsPath))) {
+			const root = path.dirname(document.uri.fsPath);
+			if (isCargoManifest(document) && !analysis.getSnapshot(root) && (!scanRunning || !roots.has(root))) {
 				void refreshWorkspace();
 			}
 		}),
@@ -106,6 +123,7 @@ export function activate(context: vscode.ExtensionContext) {
 		vscode.workspace.onDidGrantWorkspaceTrust(() => { void refreshWorkspace(); }),
 		manifestsWatcher.onDidCreate(() => { void refreshWorkspace(); }),
 		manifestsWatcher.onDidDelete(uri => {
+			scanController?.abort();
 			const root = path.dirname(uri.fsPath);
 			roots.delete(root);
 			analysis.forget(root);
@@ -116,11 +134,15 @@ export function activate(context: vscode.ExtensionContext) {
 		vscode.commands.registerCommand(SET_VERSION_COMMAND, (selection: unknown) => runUpdate(() => setVersion(analysis, selection))),
 		vscode.commands.registerCommand('cargo-deps.updateOpen', () => runUpdate(async () => {
 			const manifests = vscode.workspace.textDocuments.filter(isCargoManifest).map(document => document.uri);
-			await refreshWorkspace();
+			if (!await refreshWorkspace()) {
+				return;
+			}
 			await updateManifests(analysis, manifests);
 		})),
 		vscode.commands.registerCommand('cargo-deps.updateAll', () => runUpdate(async () => {
-			await refreshWorkspace();
+			if (!await refreshWorkspace()) {
+				return;
+			}
 			await updateManifests(analysis, [...roots].map(root => vscode.Uri.file(path.join(root, 'Cargo.toml'))));
 		})),
 		vscode.commands.registerCommand('cargo-deps.refresh', async () => {
@@ -128,8 +150,14 @@ export function activate(context: vscode.ExtensionContext) {
 				void vscode.window.showWarningMessage('Trust this workspace to run Cargo dependency analysis.');
 				return;
 			}
-			await refreshWorkspace();
-			void vscode.window.showInformationMessage('Cargo dependency analysis refreshed.');
+			if (!await refreshWorkspace()) {
+				return;
+			}
+			if (analysisHasErrors) {
+				void vscode.window.showWarningMessage('Cargo dependency analysis finished with errors. See Cargo Deps output for details.');
+			} else {
+				void vscode.window.showInformationMessage('Cargo dependency analysis refreshed.');
+			}
 		}),
 	);
 

@@ -19,7 +19,7 @@ export class CargoHintsProvider implements vscode.InlayHintsProvider {
 
 		const root = path.dirname(document.uri.fsPath);
 		const snapshot = this.analysis.getSnapshot(root);
-		if (!snapshot) {
+		if (!snapshot || snapshot.contents !== document.getText()) {
 			return [];
 		}
 
@@ -40,7 +40,7 @@ export class CargoHintsProvider implements vscode.InlayHintsProvider {
 			if (health.advisories.some(advisory => !warningKinds.has(advisory.severity?.toLowerCase() ?? ''))) {
 				labels.push('⚠️ Vulnérabilité détectée');
 			}
-		if (auditWarnings.length > 0) {
+			if (auditWarnings.length > 0) {
 				labels.push(`⚠️ cargo audit: ${auditWarnings.join(', ')}`);
 			}
 			if (labels.length === 0) {

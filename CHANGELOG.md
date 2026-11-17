@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Reuse parsed workspace manifests and release lookups, including failures, throughout each scan; retry failed lookups on the next scan.
+- Limit crates.io traffic to six concurrent HTTP requests while preserving shared lookups and successful response caching.
+- Preserve inherited dependency sources and aliases in table declarations; skip crates.io lookups for Git and alternate-registry dependencies.
+- Hide stale inlay hints while manifests have unsaved changes.
+- Report unavailable audits in dependency hovers and preserve Cargo errors instead of accepting interrupted or failed command output.
+- Avoid rescanning when opening a manifest already covered by an active scan, and report refresh errors accurately.
+
 ## 0.2.0
 
 - Fix Windows test snapshot keys to match URI-normalized paths and isolate extension activation from temporary provider fixtures.

@@ -3,7 +3,12 @@ import { dependencySources, sourceKey } from './manifestSource';
 
 const DEPENDENCY_TABLES = new Set(['dependencies', 'dev-dependencies', 'build-dependencies']);
 
-export async function parseDependencies(contents: string, workspaceDependencies: Dependency[] = []): Promise<Dependency[]> {
+export interface ParsedManifest {
+	packageName?: string;
+	dependencies: Dependency[];
+}
+
+export async function parseManifest(contents: string, workspaceDependencies: Dependency[] = []): Promise<ParsedManifest> {
 	const { parse } = await import('smol-toml');
 	const parsed = parse(contents) as Record<string, unknown>;
 	const sources = dependencySources(contents, parse);
@@ -20,13 +25,11 @@ export async function parseDependencies(contents: string, workspaceDependencies:
 		const parent = path[path.length - 2];
 		if (path.length > 1 && DEPENDENCY_TABLES.has(parent)) {
 			const name = path[path.length - 1];
+			const inherited = table.workspace === true ? workspaceByName.get(name) : undefined;
 			const source = sources.get(sourceKey(path));
 			const line = locations.get(`table:${path.join('.')}`)?.shift() ?? locations.get(`*:${name}`)?.shift() ?? 0;
 			dependencies.push({
-				name,
-				packageName: typeof table.package === 'string' ? table.package : name,
-				versionRequirement: typeof table.version === 'string' ? table.version : '*',
-				localPath: typeof table.path === 'string' ? table.path : undefined,
+				...resolveDependency(name, table, inherited),
 				versionRange: isRegistryDependency(table) ? source?.versionRange : undefined,
 				line: source?.line ?? line,
 			});
@@ -49,15 +52,11 @@ export async function parseDependencies(contents: string, workspaceDependencies:
 				}
 
 				const inherited = details.workspace === true ? workspaceByName.get(name) : undefined;
-				const packageName = typeof details.package === 'string' ? details.package : inherited?.packageName ?? name;
 				const section = path.join('.');
 				const source = sources.get(sourceKey([...path, name]));
 				const line = locations.get(`${section}:${name}`)?.shift() ?? locations.get(`*:${name}`)?.shift() ?? 0;
 				dependencies.push({
-					name,
-					packageName,
-					versionRequirement: typeof details.version === 'string' ? details.version : inherited?.versionRequirement ?? '*',
-					localPath: typeof details.path === 'string' ? details.path : inherited?.localPath,
+					...resolveDependency(name, details, inherited),
 					versionRange: isRegistryDependency(details) ? source?.versionRange : undefined,
 					line: source?.line ?? line,
 				});
@@ -72,7 +71,32 @@ export async function parseDependencies(contents: string, workspaceDependencies:
 	};
 
 	visit(parsed, []);
-	return dependencies;
+	const packageTable = parsed.package && typeof parsed.package === 'object' && !Array.isArray(parsed.package)
+		? parsed.package as Record<string, unknown>
+		: undefined;
+	return {
+		packageName: typeof packageTable?.name === 'string' ? packageTable.name : undefined,
+		dependencies,
+	};
+}
+
+export async function parseDependencies(contents: string, workspaceDependencies: Dependency[] = []): Promise<Dependency[]> {
+	return (await parseManifest(contents, workspaceDependencies)).dependencies;
+}
+
+export function isCratesIoDependency(dependency: Dependency): boolean {
+	return !dependency.localPath && !dependency.git && !dependency.registry;
+}
+
+function resolveDependency(name: string, details: Record<string, unknown>, inherited?: Dependency): Omit<Dependency, 'line' | 'versionRange'> {
+	return {
+		name,
+		packageName: typeof details.package === 'string' ? details.package : inherited?.packageName ?? name,
+		versionRequirement: typeof details.version === 'string' ? details.version : inherited?.versionRequirement ?? '*',
+		localPath: typeof details.path === 'string' ? details.path : inherited?.localPath,
+		git: typeof details.git === 'string' ? details.git : inherited?.git,
+		registry: typeof details.registry === 'string' ? details.registry : inherited?.registry,
+	};
 }
 
 function isRegistryDependency(details: Record<string, unknown>): boolean {
