@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 0.3.0
+
+- Restart an active workspace scan immediately when refreshing, cancelling Cargo
+  and HTTP work, restoring previous results and ignoring late completions.
+
 - Reuse parsed workspace manifests and release lookups, including failures, throughout each scan; retry failed lookups on the next scan.
 - Limit crates.io traffic to six concurrent HTTP requests while preserving shared lookups and successful response caching.
 - Preserve inherited dependency sources and aliases in table declarations; skip crates.io lookups for Git and alternate-registry dependencies.
