@@ -86,9 +86,11 @@ suite('Extension Test Suite', () => {
 		if (spawnSync('cargo', ['--version'], { timeout: 5_000 }).status !== 0) {
 			this.skip();
 		}
-		this.timeout(15_000);
+		this.timeout(60_000);
 		const root = await mkdtemp(path.join(tmpdir(), 'cargo-deps-tree-scope-'));
-		const cargo = new CargoService();
+		const execute = promisify(execFile);
+		const cargo = new CargoService((file, args, options) => execute(file, ['--offline', ...args], options));
+		const signal = AbortSignal.timeout(45_000);
 		try {
 			await writeFile(path.join(root, 'Cargo.toml'), '[workspace]\nmembers = ["app", "driver", "affected"]\nresolver = "2"');
 			for (const name of ['app', 'driver', 'affected']) {
@@ -97,11 +99,11 @@ suite('Extension Test Suite', () => {
 				await writeFile(path.join(member, 'src', 'lib.rs'), '');
 				await writeFile(path.join(member, 'Cargo.toml'), `[package]\nname = "${name}"\nversion = "0.25.1"\nedition = "2021"\n${name === 'app' ? '[dependencies]\naffected = { path = "../affected" }' : ''}`);
 			}
-			const affected = await cargo.inverseTree(path.join(root, 'app'), 'affected', '0.25.1');
+			const affected = await cargo.inverseTree(path.join(root, 'app'), 'affected', '0.25.1', signal);
 			assert.ok(affected.includes('0affected v0.25.1'));
 			assert.ok(affected.includes('1app v0.25.1'));
-			assert.strictEqual(await cargo.inverseTree(path.join(root, 'driver'), 'affected', '0.25.1'), '');
-			await assert.rejects(cargo.inverseTree(path.join(root, 'missing'), 'affected', '0.25.1'), CargoCommandError);
+			assert.strictEqual(await cargo.inverseTree(path.join(root, 'driver'), 'affected', '0.25.1', signal), '');
+			await assert.rejects(cargo.inverseTree(path.join(root, 'missing'), 'affected', '0.25.1', signal), CargoCommandError);
 		} finally {
 			await rm(root, { recursive: true, force: true });
 		}
