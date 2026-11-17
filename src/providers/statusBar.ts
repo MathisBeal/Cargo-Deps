@@ -47,7 +47,7 @@ export function buildAnalysisStatus(progress: AnalysisProgress): { text: string;
 		tooltip.appendMarkdown(`\nDuration: ${Math.max(0, Math.round((progress.finishedAt - progress.startedAt) / 1000))}s\n`);
 	}
 	tooltip.appendMarkdown('\n[Open analysis log](command:cargo-deps.showOutput)\n\n');
-	tooltip.appendMarkdown(hasErrors ? 'Click the status bar to view errors.' : 'Click the status bar to refresh.');
+	tooltip.appendMarkdown(running ? 'Click the status bar to restart analysis.' : hasErrors ? 'Click the status bar to view errors.' : 'Click the status bar to refresh.');
 	return { text, tooltip };
 }
 
@@ -76,7 +76,8 @@ export class AnalysisStatusBar implements vscode.Disposable {
 				return;
 			}
 			const view = buildAnalysisStatus(progress);
-			this.item.command = progress.status === 'failed' || progress.errors.length > 0 ? 'cargo-deps.showOutput' : 'cargo-deps.refresh';
+			this.item.command = progress.status !== 'running' && (progress.status === 'failed' || progress.errors.length > 0)
+				? 'cargo-deps.showOutput' : 'cargo-deps.refresh';
 			this.item.text = view.text;
 			this.item.tooltip = view.tooltip;
 			this.item.backgroundColor = progress.status === 'failed' || progress.errors.length > 0

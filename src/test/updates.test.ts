@@ -8,7 +8,8 @@ import { DependencyAnalysisService } from '../services/analysis';
 import { documentHealth, selectionFor, setVersion, updateManifests, versionEdit, SET_VERSION_COMMAND } from '../services/updates';
 import { CargoCodeActionsProvider } from '../providers/codeActionsProvider';
 import { CargoHoverProvider } from '../providers/hoverProvider';
-import type { AnalysisSnapshot, DependencyHealth } from '../types';
+import { CargoHintsProvider } from '../providers/hintsProvider';
+import type { AnalysisSnapshot, Dependency, DependencyHealth } from '../types';
 
 function healthFor(dependency: DependencyHealth['dependency']): DependencyHealth {
 	return {
@@ -25,11 +26,11 @@ class TestAnalysis extends DependencyAnalysisService {
 	private readonly snapshotsForTest = new Map<string, AnalysisSnapshot>();
 	override getSnapshot(root: string) { return this.snapshotsForTest.get(root); }
 
-	async addManifest(root: string, contents: string) {
+	async addManifest(root: string, contents: string, workspaceDependencies: Dependency[] = []) {
 		// Match the URI-derived roots used by the providers, including Windows drive casing.
 		root = vscode.Uri.file(root).fsPath;
-		const dependencies = (await parseDependencies(contents)).map(healthFor);
-		this.snapshotsForTest.set(root, { root, contents, dependencies, updatedAt: 0 });
+		const dependencies = (await parseDependencies(contents, workspaceDependencies)).map(healthFor);
+		this.snapshotsForTest.set(root, { root, contents, dependencies, workspaceDependencies, updatedAt: 0 });
 		return dependencies;
 	}
 }
@@ -37,12 +38,12 @@ class TestAnalysis extends DependencyAnalysisService {
 suite('Dependency version updates', () => {
 	const roots: string[] = [];
 	const analysis = new TestAnalysis();
-	async function manifest(contents: string) {
+	async function manifest(contents: string, workspaceDependencies: Dependency[] = []) {
 		const root = await mkdtemp(path.join(tmpdir(), 'cargo-deps-update-'));
 		roots.push(root);
 		const uri = vscode.Uri.file(path.join(root, 'Cargo.toml'));
 		await writeFile(uri.fsPath, contents);
-		const dependencies = await analysis.addManifest(root, contents);
+		const dependencies = await analysis.addManifest(root, contents, workspaceDependencies);
 		return { uri, document: await vscode.workspace.openTextDocument(uri), dependencies };
 	}
 	suiteTeardown(async () => {
@@ -134,6 +135,57 @@ suite('Dependency version updates', () => {
 		].join('\n'));
 		assert.equal(dependencies.length, 5);
 		assert.ok(dependencies.every(health => !versionEdit(document, health, '2.0.0')));
+	});
+
+	test('hides stale hints after unsaved edits instead of using outdated line numbers', async () => {
+		const { document } = await manifest('[dependencies]\n\n\nserde = "1.0"');
+		const hints = new CargoHintsProvider(analysis);
+		assert.equal(hints.provideInlayHints(document, new vscode.Range(0, 0, 4, 0)).length, 1);
+		const edit = new vscode.WorkspaceEdit();
+		edit.replace(document.uri, new vscode.Range(0, 0, 4, 0), '');
+		assert.equal(await vscode.workspace.applyEdit(edit), true);
+		assert.deepEqual(hints.provideInlayHints(document, new vscode.Range(0, 0, 1, 0)), []);
+	});
+
+	test('distinguishes unavailable audits and non-crates.io sources in dependency hovers', async () => {
+		const { document, dependencies } = await manifest([
+			'[dependencies]',
+			'serde = "1.0"',
+			'git = { git = "https://example.invalid/repo", version = "1.0" }',
+			'private = { registry = "company", version = "1.0" }',
+		].join('\n'));
+		dependencies[0].auditAvailable = false;
+		const provider = new CargoHoverProvider(analysis);
+		const hover = await provider.provideHover(document, new vscode.Position(1, 0));
+		assert.ok(hover);
+		const markdown = hover.contents[0] as vscode.MarkdownString;
+		assert.ok(markdown.value.includes('Security analysis unavailable'));
+		assert.ok(!markdown.value.includes('No known vulnerabilities'));
+		for (const line of [2, 3]) {
+			const sourceHover = await provider.provideHover(document, new vscode.Position(line, 0));
+			assert.ok(sourceHover);
+			const contents = (sourceHover.contents[0] as vscode.MarkdownString).value;
+			assert.ok(contents.includes('Not checked on crates.io'));
+			assert.ok(contents.includes('Release history is not checked'));
+			assert.ok(!contents.includes(`command:${SET_VERSION_COMMAND}`));
+		}
+	});
+
+	test('preserves inherited aliases and sources when providing hovers for unsaved manifests', async () => {
+		const workspaceDependencies = await parseDependencies([
+			'[workspace.dependencies]',
+			'transport = { package = "network", git = "https://example.invalid/repo", version = "1.0" }',
+		].join('\n'));
+		const { document } = await manifest('[dependencies.transport]\nworkspace = true', workspaceDependencies);
+		const edit = new vscode.WorkspaceEdit();
+		edit.insert(document.uri, new vscode.Position(0, 0), '# Unsaved comment\n');
+		assert.equal(await vscode.workspace.applyEdit(edit), true);
+		const health = await documentHealth(document, analysis);
+		assert.equal(health[0].dependency.packageName, 'network');
+		assert.equal(health[0].dependency.git, 'https://example.invalid/repo');
+		const hover = await new CargoHoverProvider(analysis).provideHover(document, new vscode.Position(health[0].dependency.line, 0));
+		assert.ok(hover);
+		assert.ok((hover.contents[0] as vscode.MarkdownString).value.includes('Not checked on crates.io'));
 	});
 
 	test('offers latest and previous releases as quick fixes but never yanked versions', async () => {

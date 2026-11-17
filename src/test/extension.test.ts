@@ -3,7 +3,8 @@ import * as vscode from 'vscode';
 import * as path from 'node:path';
 import { mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { spawnSync } from 'node:child_process';
+import { execFile, spawnSync } from 'node:child_process';
+import { promisify } from 'node:util';
 import { buildDiagnostics } from '../providers/diagnosticsProvider';
 import { DependencyAnalysisService } from '../services/analysis';
 import { CratesIoService } from '../services/cratesIo';
@@ -36,6 +37,51 @@ function waitForProgress(analysis: DependencyAnalysisService, predicate: (progre
 }
 
 suite('Extension Test Suite', () => {
+	test('aborts the running Cargo subprocess instead of waiting for its timeout', async () => {
+		const started = deferred<void>();
+		const closed = deferred<void>();
+		const controller = new AbortController();
+		const execute = promisify(execFile);
+		const cargo = new CargoService((_file, _args, options) => {
+			const command = execute('node', ['-e', 'setInterval(() => {}, 1000)'], options);
+			command.child.once('spawn', () => started.resolve());
+			command.child.once('close', () => closed.resolve());
+			return command;
+		});
+		const result = cargo.outdated(process.cwd(), true, controller.signal).catch(error => error);
+		try {
+			await started.promise;
+			controller.abort();
+			assert.strictEqual((await result).name, 'AbortError');
+			await closed.promise;
+		} finally {
+			controller.abort();
+			await result;
+		}
+	});
+
+	test('preserves Cargo errors with partial stdout and accepts only completed vulnerability reports', async () => {
+		const report = JSON.stringify({ vulnerabilities: { list: [] }, warnings: {} });
+		let failure: { code: number; killed: boolean; signal?: string; stdout: string; stderr: string } = {
+			code: 1, killed: false, stdout: report, stderr: 'command failed',
+		};
+		const cargo = new CargoService(async (_file, args) => {
+			if (args[0] === 'locate-project') {
+				return { stdout: path.join('/example', 'Cargo.toml'), stderr: '' };
+			}
+			throw Object.assign(new Error('command failed'), failure);
+		});
+		assert.deepStrictEqual(await cargo.audit('/example'), []);
+		await assert.rejects(cargo.outdated('/example'), /command failed/);
+		await assert.rejects(cargo.inverseTree('/example', 'serde', '1.0.0'), /command failed/);
+		failure = { ...failure, killed: true, signal: 'SIGTERM' };
+		await assert.rejects(cargo.audit('/example'), CargoCommandError);
+		failure = { ...failure, killed: false, signal: undefined, stdout: '{}' };
+		await assert.rejects(cargo.audit('/example'), /invalid audit report/);
+		const unavailable = new CargoService(async () => { throw new Error('Cargo executable unavailable'); });
+		await assert.rejects(unavailable.workspaceRoot('/example'), /Cargo executable unavailable/);
+	});
+
 	test('treats a package outside the selected member as absent while preserving real Cargo failures', async function () {
 		if (spawnSync('cargo', ['--version'], { timeout: 5_000 }).status !== 0) {
 			this.skip();
@@ -135,6 +181,8 @@ suite('Extension Test Suite', () => {
 			for (let index = 0; index < 12; index++) {
 				tracker.recordError(`Failure ${index}\nFull stderr line\nExtra detail`);
 			}
+			assert.strictEqual(item.command, 'cargo-deps.refresh');
+			assert.ok(buildAnalysisStatus(latest!).tooltip.value.includes('Click the status bar to restart analysis.'));
 			tracker.update('crates', { completed: 4 });
 			tracker.manifestCompleted();
 			tracker.finish();
@@ -384,6 +432,230 @@ suite('Extension Test Suite', () => {
 		}
 	});
 
+	test('limits HTTP concurrency and drains queued requests after failures without duplicating lookups', async () => {
+		const originalFetch = globalThis.fetch;
+		const responses = deferred<void>();
+		let active = 0;
+		let peak = 0;
+		let calls = 0;
+		globalThis.fetch = async input => {
+			calls++;
+			active++;
+			peak = Math.max(peak, active);
+			try {
+				await responses.promise;
+				if (String(input).endsWith('/crate-0')) {
+					return new Response('Service unavailable', { status: 503 });
+				}
+				return Response.json(String(input).includes('/versions')
+					? { versions: [] } : { crate: { max_version: '1.0.0' } });
+			} finally {
+				active--;
+			}
+		};
+		const service = new CratesIoService();
+		const lookups = Array.from({ length: 5 }, (_, index) => service.getReleaseInfo(`crate-${index}`));
+		const sharedEvents: CratesIoProgress[] = [];
+		const shared = service.getReleaseInfo('crate-4', event => sharedEvents.push(event));
+		const results = Promise.allSettled([...lookups, shared]);
+		try {
+			await Promise.resolve();
+			assert.strictEqual(calls, 6);
+			assert.deepStrictEqual(sharedEvents, [{ kind: 'shared' }]);
+			responses.resolve();
+			const settled = await results;
+			assert.strictEqual(calls, 10);
+			assert.strictEqual(peak, 6);
+			assert.strictEqual(active, 0);
+			assert.strictEqual(settled.filter(result => result.status === 'rejected').length, 1);
+			assert.strictEqual(settled[5].status, 'fulfilled');
+		} finally {
+			responses.resolve();
+			await results;
+			globalThis.fetch = originalFetch;
+		}
+	});
+
+	test('cancels active and queued HTTP requests and never shares an aborted lookup with its replacement', async () => {
+		const originalFetch = globalThis.fetch;
+		const first = new AbortController();
+		const replacement = new AbortController();
+		const replacementStarted = deferred<void>();
+		const replacementResponses = deferred<void>();
+		const events: CratesIoProgress[] = [];
+		let calls = 0;
+		let replacementCalls = 0;
+		globalThis.fetch = async (input, options) => {
+			calls++;
+			const signal = options?.signal;
+			assert.ok(signal);
+			if (!first.signal.aborted) {
+				await new Promise<void>((_resolve, reject) => {
+					signal.addEventListener('abort', () => reject(signal.reason), { once: true });
+				});
+			} else {
+				replacementCalls++;
+				if (replacementCalls === 2) {
+					replacementStarted.resolve();
+				}
+				await replacementResponses.promise;
+			}
+			return Response.json(String(input).includes('/versions')
+				? { versions: [] } : { crate: { max_version: '3.0.0' } });
+		};
+		const service = new CratesIoService();
+		const oldLookups = Promise.allSettled(Array.from({ length: 5 }, (_, index) =>
+			service.getReleaseInfo(`crate-${index}`, event => events.push(event), first.signal)));
+		let fresh: Promise<unknown> | undefined;
+		try {
+			await Promise.resolve();
+			assert.strictEqual(calls, 6);
+			first.abort();
+			fresh = service.getReleaseInfo('crate-0', undefined, replacement.signal);
+			await replacementStarted.promise;
+			const oldResults = await oldLookups;
+			assert.ok(oldResults.every(result => result.status === 'rejected' && result.reason.name === 'AbortError'));
+			assert.strictEqual(calls, 8, 'Cancelled queue entries must not send HTTP requests');
+			assert.ok(!events.some(event => event.kind === 'request' && event.status === 'failed'));
+			const sharedEvents: CratesIoProgress[] = [];
+			const shared = service.getReleaseInfo('crate-0', event => sharedEvents.push(event), replacement.signal);
+			assert.deepStrictEqual(sharedEvents, [{ kind: 'shared' }], 'Old cleanup must not remove the replacement lookup');
+			replacementResponses.resolve();
+			await Promise.all([fresh, shared]);
+			assert.strictEqual((await service.getReleaseInfo('crate-0')).latestVersion, '3.0.0');
+			assert.strictEqual(calls, 8);
+		} finally {
+			first.abort();
+			replacementResponses.resolve();
+			await oldLookups;
+			await fresh;
+			globalThis.fetch = originalFetch;
+		}
+	});
+
+	test('starts replacement scans immediately and ignores late Cargo results from repeated cancellations', async () => {
+		const root = await mkdtemp(path.join(tmpdir(), 'cargo-deps-restart-'));
+		const first = new AbortController();
+		const second = new AbortController();
+		const third = new AbortController();
+		const started = [deferred<void>(), deferred<void>()];
+		const commands = [deferred<[]>(), deferred<[]>()];
+		const signals: Array<AbortSignal | undefined> = [];
+		let calls = 0;
+		class TestCargoService extends CargoService {
+			override async workspaceRoot() { return root; }
+			override async audit() { return []; }
+			override async outdated(_root: string, _workspace: boolean, signal?: AbortSignal) {
+				const index = calls++;
+				signals.push(signal);
+				if (index < commands.length) {
+					started[index].resolve();
+					return commands[index].promise;
+				}
+				return [];
+			}
+		}
+		class TestCratesIoService extends CratesIoService {
+			override async getReleaseInfo() { return { latestVersion: '3.0.0', versions: [] }; }
+		}
+		const analysis = new DependencyAnalysisService(new TestCargoService(), new TestCratesIoService());
+		const progress: AnalysisProgress[] = [];
+		const subscription = analysis.onDidProgress(event => progress.push(event));
+		const operations: Promise<unknown>[] = [];
+		try {
+			await writeFile(path.join(root, 'Cargo.toml'), '[dependencies]\nserde = "1.0"');
+			operations.push(analysis.refreshAll([root], first.signal).catch(error => error));
+			await started[0].promise;
+			first.abort();
+			operations.push(analysis.refreshAll([root], second.signal).catch(error => error));
+			await started[1].promise;
+			second.abort();
+			await analysis.refreshAll([root], third.signal);
+			assert.deepStrictEqual(signals, [first.signal, second.signal, third.signal]);
+			assert.strictEqual(analysis.getSnapshot(root)?.dependencies[0].latestVersion, '3.0.0');
+			const eventsAfterReplacement = progress.length;
+			commands.forEach(command => command.resolve([]));
+			const cancelled = await Promise.all(operations);
+			assert.ok(cancelled.every(error => error instanceof Error && error.name === 'AbortError'));
+			assert.strictEqual(progress.length, eventsAfterReplacement, 'Late completions must not update replacement progress');
+			assert.deepStrictEqual(progress[progress.length - 1].errors, []);
+			assert.strictEqual(progress[progress.length - 1].status, 'completed');
+			assert.strictEqual(analysis.getSnapshot(root)?.dependencies[0].latestVersion, '3.0.0');
+		} finally {
+			first.abort();
+			second.abort();
+			third.abort();
+			commands.forEach(command => command.resolve([]));
+			await Promise.all(operations);
+			subscription.dispose();
+			analysis.dispose();
+			await rm(root, { recursive: true, force: true });
+		}
+	});
+
+	test('restores previous snapshots and removes partial results when a scan is cancelled', async () => {
+		const root = await mkdtemp(path.join(tmpdir(), 'cargo-deps-rollback-'));
+		const member = path.join(root, 'member');
+		const pending = path.join(root, 'pending');
+		const controller = new AbortController();
+		const blocked = deferred<void>();
+		const release = deferred<void>();
+		let latestVersion = '1.0.0';
+		class TestCargoService extends CargoService {
+			override async workspaceRoot(manifestRoot: string) {
+				if (manifestRoot === pending) {
+					blocked.resolve();
+					await release.promise;
+				}
+				return root;
+			}
+			override async audit() { return []; }
+			override async outdated() { return []; }
+		}
+		class TestCratesIoService extends CratesIoService {
+			override async getReleaseInfo() { return { latestVersion, versions: [] }; }
+		}
+		const analysis = new DependencyAnalysisService(new TestCargoService(), new TestCratesIoService());
+		const published: Array<{ root: string; contents: string }> = [];
+		const subscription = analysis.onDidAnalyze(snapshot => published.push(snapshot));
+		let operation: Promise<unknown> | undefined;
+		try {
+			await mkdir(member);
+			await mkdir(pending);
+			for (const manifestRoot of [root, member, pending]) {
+				await writeFile(path.join(manifestRoot, 'Cargo.toml'), '[dependencies]\nserde = "1.0"');
+			}
+			await analysis.refreshAll([root]);
+			const previous = analysis.getSnapshot(root);
+			latestVersion = '2.0.0';
+			operation = analysis.refreshAll([root, member, pending], controller.signal).catch(error => error);
+			await blocked.promise;
+			assert.strictEqual(analysis.getSnapshot(root)?.dependencies[0].latestVersion, '2.0.0');
+			assert.ok(analysis.getSnapshot(member));
+			controller.abort();
+			assert.strictEqual(analysis.getSnapshot(root), previous);
+			assert.strictEqual(analysis.getSnapshot(member), undefined);
+			assert.deepStrictEqual(published.slice(-2).map(snapshot => [snapshot.root, snapshot.contents]), [
+				[root, previous!.contents], [member, ''],
+			]);
+			latestVersion = '3.0.0';
+			await analysis.refreshAll([root, member], new AbortController().signal);
+			release.resolve();
+			const error = await operation;
+			assert.ok(error instanceof Error);
+			assert.strictEqual(error.name, 'AbortError');
+			assert.strictEqual(analysis.getSnapshot(root)?.dependencies[0].latestVersion, '3.0.0');
+			assert.strictEqual(analysis.getSnapshot(pending), undefined);
+		} finally {
+			controller.abort();
+			release.resolve();
+			await operation;
+			subscription.dispose();
+			analysis.dispose();
+			await rm(root, { recursive: true, force: true });
+		}
+	});
+
 	test('keeps partial failures visible across manifests and clears them on the next scan', async () => {
 		const root = await mkdtemp(path.join(tmpdir(), 'cargo-deps-errors-'));
 		const member = path.join(root, 'member');
@@ -414,12 +686,14 @@ suite('Extension Test Suite', () => {
 			assert.ok(buildAnalysisStatus(partial).text.includes('partial results'));
 			assert.ok(!buildAnalysisStatus(partial).text.includes('~spin'));
 			assert.ok(analysis.getSnapshot(member));
+			assert.strictEqual(analysis.getSnapshot(member)?.dependencies[0].auditAvailable, false);
 			fail = false;
 			await analysis.refreshAll([root, member]);
 			const success = events[events.length - 1];
 			assert.deepStrictEqual(success.errors, []);
 			assert.strictEqual(success.steps.find(step => step.id === 'audit')?.status, 'completed');
 			assert.strictEqual(buildAnalysisStatus(success).text, '$(check) Cargo Deps');
+			assert.strictEqual(analysis.getSnapshot(member)?.dependencies[0].auditAvailable, true);
 		} finally {
 			subscription.dispose();
 			analysis.dispose();
@@ -568,6 +842,74 @@ suite('Extension Test Suite', () => {
 		} finally {
 			subscription.dispose();
 			collection.dispose();
+			analysis.dispose();
+			await rm(root, { recursive: true, force: true });
+		}
+	});
+
+	test('reuses workspace manifests and failed release lookups within a scan, then retries on the next scan', async () => {
+		const root = await mkdtemp(path.join(tmpdir(), 'cargo-deps-batch-cache-'));
+		const member = path.join(root, 'member');
+		const contents = [
+			'[workspace.dependencies]',
+			'public = "1.0"',
+			'renamed = { package = "public", version = "1.0" }',
+			'git = { git = "https://example.invalid/repo", version = "1.0" }',
+			'private = { registry = "company", version = "1.0" }',
+			'local = { path = "../local", version = "1.0" }',
+		].join('\n');
+		let changeWorkspace = true;
+		let fail = true;
+		const lookups: string[] = [];
+		class TestCargoService extends CargoService {
+			override async workspaceRoot(manifestRoot: string) {
+				if (manifestRoot === member && changeWorkspace) {
+					changeWorkspace = false;
+					await writeFile(path.join(root, 'Cargo.toml'), contents.replaceAll('"1.0"', '"2.0"'));
+				}
+				return root;
+			}
+			override async audit() { return []; }
+			override async outdated() { return []; }
+		}
+		class TestCratesIoService extends CratesIoService {
+			override async getReleaseInfo(name: string) {
+				lookups.push(name);
+				if (fail) { throw new Error('Registry unavailable'); }
+				return { latestVersion: '3.0.0', versions: [] };
+			}
+		}
+		const analysis = new DependencyAnalysisService(new TestCargoService(), new TestCratesIoService());
+		try {
+			await mkdir(member);
+			await writeFile(path.join(root, 'Cargo.toml'), contents);
+			await writeFile(path.join(member, 'Cargo.toml'), [
+				'[dependencies]',
+				'public.workspace = true',
+				'git.workspace = true',
+				'private.workspace = true',
+				'[dependencies.local]',
+				'workspace = true',
+				'[dependencies.renamed]',
+				'workspace = true',
+			].join('\n'));
+			await analysis.refreshAll([root, member]);
+			assert.deepStrictEqual(lookups, ['public']);
+			const dependencies = analysis.getSnapshot(member)!.dependencies.map(health => health.dependency);
+			assert.ok(dependencies.every(dependency => dependency.versionRequirement === '1.0'));
+			assert.strictEqual(dependencies.find(dependency => dependency.name === 'git')?.git, 'https://example.invalid/repo');
+			assert.strictEqual(dependencies.find(dependency => dependency.name === 'private')?.registry, 'company');
+			assert.strictEqual(dependencies.find(dependency => dependency.name === 'local')?.localPath, '../local');
+			assert.strictEqual(dependencies.find(dependency => dependency.name === 'renamed')?.packageName, 'public');
+
+			fail = false;
+			await analysis.refreshAll([member, root]);
+			assert.deepStrictEqual(lookups, ['public', 'public']);
+			const health = analysis.getSnapshot(member)!.dependencies;
+			assert.ok(health.every(item => item.dependency.versionRequirement === '2.0'));
+			assert.ok(health.filter(item => ['git', 'private', 'local'].includes(item.dependency.name)).every(item => item.latestVersion === ''));
+			assert.strictEqual(health.find(item => item.dependency.name === 'public')?.latestVersion, '3.0.0');
+		} finally {
 			analysis.dispose();
 			await rm(root, { recursive: true, force: true });
 		}

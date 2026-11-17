@@ -3,6 +3,8 @@ export interface Dependency {
 	packageName: string;
 	versionRequirement: string;
 	localPath?: string;
+	git?: string;
+	registry?: string;
 	versionRange?: { start: number; end: number };
 	line: number;
 }
@@ -33,12 +35,14 @@ export interface DependencyHealth {
 	latestVersion: string;
 	versions: PublishedVersion[];
 	advisories: Advisory[];
+	auditAvailable?: boolean;
 }
 
 export interface AnalysisSnapshot {
 	root: string;
 	contents: string;
 	dependencies: DependencyHealth[];
+	workspaceDependencies?: Dependency[];
 	updatedAt: number;
 }
 
