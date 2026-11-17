@@ -3,7 +3,12 @@ import { dependencySources, sourceKey } from './manifestSource';
 
 const DEPENDENCY_TABLES = new Set(['dependencies', 'dev-dependencies', 'build-dependencies']);
 
-export async function parseDependencies(contents: string, workspaceDependencies: Dependency[] = []): Promise<Dependency[]> {
+export interface ParsedManifest {
+	packageName?: string;
+	dependencies: Dependency[];
+}
+
+export async function parseManifest(contents: string, workspaceDependencies: Dependency[] = []): Promise<ParsedManifest> {
 	const { parse } = await import('smol-toml');
 	const parsed = parse(contents) as Record<string, unknown>;
 	const sources = dependencySources(contents, parse);
@@ -72,7 +77,17 @@ export async function parseDependencies(contents: string, workspaceDependencies:
 	};
 
 	visit(parsed, []);
-	return dependencies;
+	const packageTable = parsed.package && typeof parsed.package === 'object' && !Array.isArray(parsed.package)
+		? parsed.package as Record<string, unknown>
+		: undefined;
+	return {
+		packageName: typeof packageTable?.name === 'string' ? packageTable.name : undefined,
+		dependencies,
+	};
+}
+
+export async function parseDependencies(contents: string, workspaceDependencies: Dependency[] = []): Promise<Dependency[]> {
+	return (await parseManifest(contents, workspaceDependencies)).dependencies;
 }
 
 function isRegistryDependency(details: Record<string, unknown>): boolean {

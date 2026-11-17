@@ -19,28 +19,13 @@ export class CargoService {
 		return parseAuditReport(data);
 	}
 
-	async outdated(root: string): Promise<CargoOutdatedEntry[]> {
-		const data = await this.runJson(root, ['outdated', '--format', 'json'], 'cargo-outdated');
-		const rows: CargoOutdatedEntry[] = [];
-		const visit = (value: unknown) => {
-			if (Array.isArray(value)) {
-				value.forEach(visit);
-				return;
-			}
-			if (!value || typeof value !== 'object') {
-				return;
-			}
-			const row = value as Record<string, unknown>;
-			const name = stringValue(row.name ?? row.Name);
-			const project = stringValue(row.project ?? row.Project);
-			const latest = stringValue(row.latest ?? row.Latest);
-			if (name && (project || latest)) {
-				rows.push({ name, project, latest });
-			}
-			Object.values(row).forEach(visit);
-		};
-		visit(data);
-		return rows;
+	async outdated(root: string, workspace = false): Promise<CargoOutdatedEntry[]> {
+		const args = ['outdated', '--format', 'json'];
+		if (workspace) {
+			args.push('--workspace');
+		}
+		const data = await this.runJson(root, args, 'cargo-outdated');
+		return parseOutdatedReport(data);
 	}
 
 	async inverseTree(root: string, packageName: string, version: string): Promise<string> {
@@ -96,6 +81,30 @@ export class CargoService {
 			);
 		}
 	}
+}
+
+export function parseOutdatedReport(data: unknown): CargoOutdatedEntry[] {
+	const rows: CargoOutdatedEntry[] = [];
+	const visit = (value: unknown, crateName?: string) => {
+		if (Array.isArray(value)) {
+			value.forEach(item => visit(item, crateName));
+			return;
+		}
+		if (!value || typeof value !== 'object') {
+			return;
+		}
+		const row = value as Record<string, unknown>;
+		const owner = stringValue(row.crate_name ?? row.crateName, crateName);
+		const name = stringValue(row.name ?? row.Name);
+		const project = stringValue(row.project ?? row.Project);
+		const latest = stringValue(row.latest ?? row.Latest);
+		if (name && (project || latest)) {
+			rows.push({ name, project, latest, crateName: owner || undefined });
+		}
+		Object.values(row).forEach(child => visit(child, owner || crateName));
+	};
+	visit(data);
+	return rows;
 }
 
 export function parseCargoJson(output: string): unknown {

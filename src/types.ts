@@ -46,6 +46,7 @@ export interface CargoOutdatedEntry {
 	name: string;
 	project?: string;
 	latest?: string;
+	crateName?: string;
 }
 
 export interface CargoAuditEntry {

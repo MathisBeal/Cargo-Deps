@@ -2,7 +2,7 @@ import * as vscode from 'vscode';
 import * as path from 'node:path';
 import { CargoCommandError, CargoService } from './cargo';
 import { CratesIoService } from './cratesIo';
-import { parseDependencies } from './manifest';
+import { parseDependencies, parseManifest } from './manifest';
 import { AnalysisProgressTracker } from './progress';
 import type { AnalysisStepId } from './progress';
 import type { Advisory, AnalysisSnapshot, CargoAuditEntry, CargoOutdatedEntry, CrateReleaseInfo, Dependency, DependencyHealth } from '../types';
@@ -18,6 +18,7 @@ export class DependencyAnalysisService {
 	private readonly progress = new AnalysisProgressTracker();
 	readonly onDidProgress = this.progress.onDidChange;
 	private readonly auditFailures = new Map<string, string>();
+	private readonly outdatedFailures = new Map<string, string>();
 
 	constructor(
 		private readonly cargo = new CargoService(),
@@ -39,18 +40,24 @@ export class DependencyAnalysisService {
 		this.changeEmitter.fire();
 	}
 
-	refresh(root: string, audits = new Map<string, Promise<CargoAuditEntry[]>>(), inBatch = false): Promise<void> {
+	refresh(
+		root: string,
+		audits = new Map<string, Promise<CargoAuditEntry[]>>(),
+		outdated = new Map<string, Promise<CargoOutdatedEntry[]>>(),
+		inBatch = false,
+	): Promise<void> {
 		const pending = this.inFlight.get(root);
 		if (pending) {
 			return pending;
 		}
 		if (!inBatch) {
 			this.auditFailures.clear();
+			this.outdatedFailures.clear();
 			this.progress.begin(1);
 			this.progress.manifest(root);
 		}
 
-		const operation = this.analyze(root, audits).then(() => {
+		const operation = this.analyze(root, audits, outdated).then(() => {
 			if (!inBatch) {
 				this.progress.manifestCompleted();
 				this.progress.finish();
@@ -69,13 +76,15 @@ export class DependencyAnalysisService {
 
 	async refreshAll(roots: string[]): Promise<void> {
 		const audits = new Map<string, Promise<CargoAuditEntry[]>>();
+		const outdated = new Map<string, Promise<CargoOutdatedEntry[]>>();
 		const uniqueRoots = [...new Set(roots)];
 		this.auditFailures.clear();
+		this.outdatedFailures.clear();
 		this.progress.begin(uniqueRoots.length);
 		try {
 			for (const root of uniqueRoots) {
 				this.progress.manifest(root);
-				await this.refresh(root, audits, true);
+				await this.refresh(root, audits, outdated, true);
 				this.progress.manifestCompleted();
 			}
 			this.progress.finish();
@@ -85,11 +94,16 @@ export class DependencyAnalysisService {
 		}
 	}
 
-	private async analyze(root: string, audits: Map<string, Promise<CargoAuditEntry[]>>): Promise<void> {
+	private async analyze(
+		root: string,
+		audits: Map<string, Promise<CargoAuditEntry[]>>,
+		outdated: Map<string, Promise<CargoOutdatedEntry[]>>,
+	): Promise<void> {
 		const manifest = vscode.Uri.file(path.join(root, 'Cargo.toml'));
 		let dependencies: Dependency[];
 		let contents: string;
 		let workspaceRoot: string;
+		let packageName: string | undefined;
 		this.progress.update('manifest', { status: 'running', active: [manifest.fsPath] });
 		try {
 			const bytes = await vscode.workspace.fs.readFile(manifest);
@@ -99,7 +113,7 @@ export class DependencyAnalysisService {
 				? []
 				: await vscode.workspace.fs.readFile(vscode.Uri.file(path.join(workspaceRoot, 'Cargo.toml')))
 					.then(workspaceBytes => parseDependencies(new TextDecoder().decode(workspaceBytes)));
-			dependencies = await parseDependencies(contents, workspaceDependencies);
+			({ dependencies, packageName } = await parseManifest(contents, workspaceDependencies));
 			this.progress.update('manifest', { status: 'completed', completed: 1, active: [], detail: `${dependencies.length} dependencies` });
 		} catch (error) {
 			this.progress.error('manifest', errorMessage(error));
@@ -124,10 +138,27 @@ export class DependencyAnalysisService {
 				detail: failure ? `Workspace audit unavailable: ${failure}` : `Reused workspace audit: ${workspaceRoot}`,
 			});
 		}
-		const [auditEntries, outdatedEntries] = await Promise.all([
-			audit,
-			this.runCargoStep('cargo-outdated', root, () => this.cargo.outdated(root), [], 'outdated'),
-		]);
+		let workspaceOutdated = outdated.get(workspaceRoot);
+		if (!workspaceOutdated) {
+			workspaceOutdated = this.runCargoStep(
+				'cargo-outdated',
+				workspaceRoot,
+				() => this.cargo.outdated(workspaceRoot, true),
+				[],
+				'outdated',
+			);
+			outdated.set(workspaceRoot, workspaceOutdated);
+		} else {
+			const failure = this.outdatedFailures.get(workspaceRoot);
+			this.progress.update('outdated', {
+				status: failure ? 'failed' : 'completed', completed: failure ? 0 : 1,
+				detail: failure ? `Workspace outdated check unavailable: ${failure}` : `Reused workspace outdated check: ${workspaceRoot}`,
+			});
+		}
+		const [auditEntries, outdatedEntries] = await Promise.all([audit, workspaceOutdated]);
+		const memberOutdated = outdatedEntries.some(entry => entry.crateName)
+			? outdatedEntries.filter(entry => entry.crateName === packageName)
+			: outdatedEntries;
 		const advisories = await this.attachAdvisories(root, dependencies, auditEntries);
 
 		const crateNames = [...new Set(dependencies.filter(dependency => !dependency.localPath).map(dependency => dependency.packageName))];
@@ -160,7 +191,7 @@ export class DependencyAnalysisService {
 		const health = dependencies.map(dependency => {
 			const releaseInfo = releases.get(dependency.packageName);
 
-			const outdated = findOutdatedEntry(outdatedEntries, dependency);
+			const outdated = findOutdatedEntry(memberOutdated, dependency);
 			return {
 				dependency,
 				installedVersion: outdated?.project || cleanVersion(dependency.versionRequirement),
@@ -260,6 +291,8 @@ export class DependencyAnalysisService {
 			const message = errorMessage(error);
 			if (step === 'audit') {
 				this.auditFailures.set(root, message);
+			} else if (step === 'outdated') {
+				this.outdatedFailures.set(root, message);
 			}
 			this.progress.error(step, `${key}: ${message}`);
 			const install = key === 'cargo-audit' ? 'cargo install cargo-audit' : 'cargo install cargo-outdated';

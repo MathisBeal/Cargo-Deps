@@ -9,7 +9,7 @@ import { DependencyAnalysisService } from '../services/analysis';
 import { CratesIoService } from '../services/cratesIo';
 import { isOutdated } from '../providers/hintsProvider';
 import { formatDependencyPath } from '../providers/hoverProvider';
-import { CargoCommandError, CargoService, parseAuditReport, parseCargoJson } from '../services/cargo';
+import { CargoCommandError, CargoService, parseAuditReport, parseCargoJson, parseOutdatedReport } from '../services/cargo';
 import { parseDependencies } from '../services/manifest';
 import { AnalysisStatusBar, buildAnalysisStatus } from '../providers/statusBar';
 import { AnalysisProgressTracker } from '../services/progress';
@@ -145,7 +145,8 @@ suite('Extension Test Suite', () => {
 			assert.ok(messages.some(message => message.includes('12 error(s)')));
 			assert.strictEqual(item.command, 'cargo-deps.showOutput');
 			const tooltip = buildAnalysisStatus(latest!).tooltip;
-			assert.ok(tooltip.value.includes('4 more errors'));
+			assert.ok(tooltip.value.includes('12 analysis errors'));
+			assert.ok(!tooltip.value.includes('Full stderr line'));
 			assert.ok(tooltip.value.includes('command:cargo-deps.showOutput'));
 			assert.deepStrictEqual(tooltip.isTrusted, { enabledCommands: ['cargo-deps.showOutput'] });
 			output.show();
@@ -241,9 +242,12 @@ suite('Extension Test Suite', () => {
 			assert.deepStrictEqual(requests.activeCrates, ['eframe']);
 			assert.strictEqual(requests.steps.find(step => step.id === 'crates')?.total, 1);
 			const view = buildAnalysisStatus(requests);
-			assert.ok(view.tooltip.value.includes('https://crates.io/api/v1/crates/eframe'));
-			assert.ok(view.tooltip.value.includes('0/2'));
-			assert.ok(view.tooltip.value.includes('run in parallel'));
+			assert.ok(view.tooltip.value.includes('Loading published versions (0/1)'));
+			assert.ok(view.tooltip.value.includes('- $(sync~spin) Loading published versions (0/1) - running'));
+			assert.strictEqual((view.tooltip.value.match(/\*\*\d+%\*\*/g) ?? []).length, 1);
+			assert.ok(!view.tooltip.value.includes('https://crates.io'));
+			assert.ok(!view.tooltip.value.includes('HTTP'));
+			assert.ok(!view.tooltip.value.includes('Cache hits'));
 			responses.resolve();
 			await operation;
 			const completed = events[events.length - 1];
@@ -274,6 +278,67 @@ suite('Extension Test Suite', () => {
 			status.dispose();
 			analysis.dispose();
 			await rm(root, { recursive: true, force: true });
+		}
+	});
+
+	test('keeps the workspace bar and lists manifest steps with their states and counts', () => {
+		const tracker = new AnalysisProgressTracker();
+		let latest!: AnalysisProgress;
+		const subscription = tracker.onDidChange(progress => { latest = progress; });
+		try {
+			tracker.begin(2);
+			tracker.manifest('/example/first');
+			assert.ok(buildAnalysisStatus(latest).tooltip.value.includes('`[--------------------]` **0%**'));
+			for (const step of ['manifest', 'audit', 'outdated', 'tree', 'crates'] as const) {
+				tracker.update(step, { status: 'completed' });
+			}
+			tracker.manifestCompleted();
+			let tooltip = buildAnalysisStatus(latest).tooltip.value;
+			assert.ok(tooltip.includes('1/2 manifests processed'));
+			assert.ok(tooltip.includes('`[==========----------]` **50%**'));
+			assert.ok(tooltip.includes('- $(check) Reading manifest - completed'));
+			assert.ok(!tooltip.includes('**100%**'));
+
+			tracker.manifest('/example/second');
+			tracker.update('manifest', { status: 'completed' });
+			tracker.update('audit', { status: 'skipped' });
+			tracker.update('outdated', { status: 'completed' });
+			tracker.update('tree', { status: 'skipped' });
+			tracker.update('crates', { status: 'running', total: 10, completed: 5, active: ['https://example.invalid/versions'] });
+			tooltip = buildAnalysisStatus(latest).tooltip.value;
+			assert.ok(tooltip.includes('`[==========----------]` **50%**'));
+			assert.strictEqual((tooltip.match(/\*\*\d+%\*\*/g) ?? []).length, 1);
+			assert.ok(tooltip.includes('- $(check) Reading manifest - completed'));
+			assert.ok(tooltip.includes('- $(dash) Checking security advisories - skipped'));
+			assert.ok(tooltip.includes('- $(check) Checking dependency updates - completed'));
+			assert.ok(tooltip.includes('- $(dash) Tracing affected dependencies - skipped'));
+			assert.ok(tooltip.includes('- $(sync~spin) Loading published versions (5/10) - running'));
+			assert.ok(!tooltip.includes('https://example.invalid'));
+
+			tracker.update('crates', { status: 'failed' });
+			assert.ok(buildAnalysisStatus(latest).tooltip.value.includes('- $(warning) Loading published versions (5/10) - failed'));
+			tracker.update('crates', { status: 'completed', completed: 10 });
+			tracker.manifestCompleted();
+			tracker.finish();
+			tooltip = buildAnalysisStatus(latest).tooltip.value;
+			assert.ok(tooltip.includes('2/2 manifests processed'));
+			assert.ok(tooltip.includes('`[====================]` **100%**'));
+			assert.ok(!tooltip.includes('Current manifest'));
+			assert.ok(!tooltip.includes('Loading published versions'));
+			assert.ok(tooltip.includes('Duration:'));
+
+			tracker.begin(2);
+			tracker.manifest('/example/broken');
+			tracker.finish('Analysis interrupted');
+			tooltip = buildAnalysisStatus(latest).tooltip.value;
+			assert.ok(tooltip.includes('Analysis failed'));
+			assert.ok(tooltip.includes('0/2 manifests processed'));
+			assert.ok(tooltip.includes('1 analysis error'));
+			assert.ok(tooltip.includes('command:cargo-deps.showOutput'));
+			assert.ok(!tooltip.includes('**100%**'));
+		} finally {
+			subscription.dispose();
+			tracker.dispose();
 		}
 	});
 
@@ -508,6 +573,64 @@ suite('Extension Test Suite', () => {
 		}
 	});
 
+	test('runs cargo outdated once per workspace and keeps member-specific results', async () => {
+		const root = await mkdtemp(path.join(tmpdir(), 'cargo-deps-outdated-'));
+		const member = path.join(root, 'member');
+		let outdatedCalls = 0;
+		class TestCargoService extends CargoService {
+			override async workspaceRoot() { return root; }
+			override async audit() { return []; }
+			override async outdated(workspaceRoot: string, workspace: boolean) {
+				outdatedCalls++;
+				assert.strictEqual(workspaceRoot, root);
+				assert.strictEqual(workspace, true);
+				return [
+					{ crateName: 'application', name: 'serde', project: '1.0.0', latest: '1.1.0' },
+					{ crateName: 'member', name: 'serde', project: '2.0.0', latest: '2.1.0' },
+				];
+			}
+		}
+		class TestCratesIoService extends CratesIoService {
+			override async getReleaseInfo() { return { latestVersion: '9.0.0', versions: [] }; }
+		}
+		const analysis = new DependencyAnalysisService(new TestCargoService(), new TestCratesIoService());
+		try {
+			await mkdir(member);
+			await writeFile(path.join(root, 'Cargo.toml'), [
+				'[workspace]',
+				'members = ["member"]',
+				'resolver = "2"',
+				'[package]',
+				'name = "application"',
+				'version = "0.1.0"',
+				'[dependencies]',
+				'serde = "1.0"',
+			].join('\n'));
+			await writeFile(path.join(member, 'Cargo.toml'), [
+				'[package]',
+				'name = "member"',
+				'version = "0.1.0"',
+				'[dependencies]',
+				'serde = "2.0"',
+			].join('\n'));
+
+			await analysis.refreshAll([root, member]);
+
+			assert.strictEqual(outdatedCalls, 1);
+			assert.deepStrictEqual(
+				analysis.getSnapshot(root)?.dependencies.map(health => [health.installedVersion, health.latestVersion]),
+				[['1.0.0', '1.1.0']],
+			);
+			assert.deepStrictEqual(
+				analysis.getSnapshot(member)?.dependencies.map(health => [health.installedVersion, health.latestVersion]),
+				[['2.0.0', '2.1.0']],
+			);
+		} finally {
+			analysis.dispose();
+			await rm(root, { recursive: true, force: true });
+		}
+	});
+
 	test('publishes info on the version and warnings for transitive advisories', async () => {
 		const contents = '[dependencies]\neframe = { version = "0.36.2" }';
 		const dependencies = await parseDependencies(contents);
@@ -657,12 +780,17 @@ suite('Extension Test Suite', () => {
 	});
 
 	test('parses cargo outdated newline-delimited JSON', () => {
-		assert.deepStrictEqual(parseCargoJson([
+		const output = parseCargoJson([
 			'{"crate_name":"demo_app","dependencies":[{"name":"serialport","project":"4.9.0","latest":"4.10.1"}]}',
 			'{"crate_name":"driver_commons","dependencies":[{"name":"serialport","project":"4.9.0","latest":"4.10.1"}]}',
-		].join('\n')), [
+		].join('\n'));
+		assert.deepStrictEqual(output, [
 			{ crate_name: 'demo_app', dependencies: [{ name: 'serialport', project: '4.9.0', latest: '4.10.1' }] },
 			{ crate_name: 'driver_commons', dependencies: [{ name: 'serialport', project: '4.9.0', latest: '4.10.1' }] },
+		]);
+		assert.deepStrictEqual(parseOutdatedReport(output), [
+			{ crateName: 'demo_app', name: 'serialport', project: '4.9.0', latest: '4.10.1' },
+			{ crateName: 'driver_commons', name: 'serialport', project: '4.9.0', latest: '4.10.1' },
 		]);
 	});
 
