@@ -832,6 +832,9 @@ suite('Extension Test Suite', () => {
 			await writeFile(path.join(member, 'Cargo.toml'), '[package]\nname = "member"\nversion = "0.1.0"\n[dependencies]\nserialport.workspace = true');
 			await analysis.refreshAll([root, member, member]);
 			assert.strictEqual(auditCalls, 1);
+			assert.strictEqual(analysis.getSnapshots().length, 2);
+			assert.strictEqual(analysis.getSnapshot(member)?.packageName, 'member');
+			assert.strictEqual(analysis.getSnapshot(member)?.workspaceRoot, root);
 			for (const manifestRoot of [root, member]) {
 				const uri = vscode.Uri.file(path.join(manifestRoot, 'Cargo.toml'));
 				assert.ok(!vscode.workspace.textDocuments.some(document => document.uri.toString() === uri.toString()));
@@ -1204,5 +1207,15 @@ suite('Extension Test Suite', () => {
 			assert.ok(extension.packageJSON.contributes.commands.some((item: { command: string }) => item.command === command));
 		}
 		assert.ok(commands.includes(SET_VERSION_COMMAND));
+		for (const command of ['cargo-deps.filterUpdates', 'cargo-deps.updateDependency', 'cargo-deps.updateVisible']) {
+			assert.ok(commands.includes(command));
+		}
+		const contributedViews = extension.packageJSON.contributes.views['cargo-deps'] as { id: string }[];
+		assert.deepStrictEqual(contributedViews.map(view => view.id), [
+			'cargo-deps.dependencies', 'cargo-deps.updates', 'cargo-deps.security',
+		]);
+		for (const view of contributedViews) {
+			await vscode.commands.executeCommand(`${view.id}.focus`);
+		}
 	});
 });

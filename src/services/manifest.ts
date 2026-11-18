@@ -13,7 +13,9 @@ export async function parseManifest(contents: string, workspaceDependencies: Dep
 	const parsed = parse(contents) as Record<string, unknown>;
 	const sources = dependencySources(contents, parse);
 	const locations = findDependencyLocations(contents);
-	const workspaceByName = new Map(workspaceDependencies.map(dependency => [dependency.name, dependency]));
+	const workspaceByName = new Map(workspaceDependencies
+		.filter(dependency => dependency.workspace === 'declaration')
+		.map(dependency => [dependency.name, dependency]));
 	const dependencies: Dependency[] = [];
 
 	const visit = (value: unknown, path: string[]) => {
@@ -28,8 +30,10 @@ export async function parseManifest(contents: string, workspaceDependencies: Dep
 			const inherited = table.workspace === true ? workspaceByName.get(name) : undefined;
 			const source = sources.get(sourceKey(path));
 			const line = locations.get(`table:${path.join('.')}`)?.shift() ?? locations.get(`*:${name}`)?.shift() ?? 0;
+			const section = path.slice(0, -1).join('.');
 			dependencies.push({
-				...resolveDependency(name, table, inherited),
+				...resolveDependency(name, table, inherited, section === 'workspace.dependencies'),
+				section,
 				versionRange: isRegistryDependency(table) ? source?.versionRange : undefined,
 				line: source?.line ?? line,
 			});
@@ -56,7 +60,8 @@ export async function parseManifest(contents: string, workspaceDependencies: Dep
 				const source = sources.get(sourceKey([...path, name]));
 				const line = locations.get(`${section}:${name}`)?.shift() ?? locations.get(`*:${name}`)?.shift() ?? 0;
 				dependencies.push({
-					...resolveDependency(name, details, inherited),
+					...resolveDependency(name, details, inherited, section === 'workspace.dependencies'),
+					section,
 					versionRange: isRegistryDependency(details) ? source?.versionRange : undefined,
 					line: source?.line ?? line,
 				});
@@ -88,7 +93,7 @@ export function isCratesIoDependency(dependency: Dependency): boolean {
 	return !dependency.localPath && !dependency.git && !dependency.registry;
 }
 
-function resolveDependency(name: string, details: Record<string, unknown>, inherited?: Dependency): Omit<Dependency, 'line' | 'versionRange'> {
+function resolveDependency(name: string, details: Record<string, unknown>, inherited?: Dependency, workspaceDeclaration = false): Omit<Dependency, 'line' | 'versionRange'> {
 	return {
 		name,
 		packageName: typeof details.package === 'string' ? details.package : inherited?.packageName ?? name,
@@ -96,6 +101,7 @@ function resolveDependency(name: string, details: Record<string, unknown>, inher
 		localPath: typeof details.path === 'string' ? details.path : inherited?.localPath,
 		git: typeof details.git === 'string' ? details.git : inherited?.git,
 		registry: typeof details.registry === 'string' ? details.registry : inherited?.registry,
+		workspace: details.workspace === true ? 'inherited' : workspaceDeclaration ? 'declaration' : undefined,
 	};
 }
 

@@ -46,6 +46,10 @@ export class DependencyAnalysisService {
 		return this.snapshots.get(root);
 	}
 
+	getSnapshots(): readonly AnalysisSnapshot[] {
+		return [...this.snapshots.values()];
+	}
+
 	forget(root: string): void {
 		this.snapshots.delete(root);
 		this.changeEmitter.fire();
@@ -284,7 +288,10 @@ export class DependencyAnalysisService {
 			} satisfies DependencyHealth;
 		});
 
-		const snapshot = { root, contents, dependencies: health, workspaceDependencies, updatedAt: Date.now() };
+		const snapshot = {
+			root, contents, packageName, workspaceRoot, auditAvailable: !this.auditFailures.has(workspaceRoot),
+			dependencies: health, workspaceDependencies, updatedAt: Date.now(),
+		};
 		this.publishSnapshot(root, snapshot, batch);
 	}
 

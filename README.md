@@ -19,6 +19,36 @@ Extension VS Code pour consulter l'etat des dependances Rust directement dans `C
 - Versions cliquables dans le survol (derniere version et historique), et actions rapides par dependance (`Ctrl+.`) pour choisir une version.
 - Deux commandes F1 : `Cargo Deps: Update Open Manifests to Latest` pour les `Cargo.toml` ouverts, et `Cargo Deps: Update All Workspace Manifests to Latest` pour tout le workspace.
 
+### Panneau Cargo Deps
+
+L'icone en forme de colis dans la barre d'activite ouvre trois vues natives,
+repliables et deplacables comme les autres vues de VS Code :
+
+- **Dependencies** : les dependances directes, dev et build regroupees par crate,
+  avec leur version. Les declarations partagees du workspace sont aussi visibles.
+  Le survol reprend les informations de l'editeur, y compris les liens de
+  documentation/depot et les versions cliquables. Cliquer ouvre le manifeste.
+- **Updates** : uniquement les exigences pouvant etre passees a une version plus
+  recente. Le filtre permet de choisir toutes les crates ou une seule. La fleche
+  d'une dependance met a jour sa declaration; celle d'une crate ou de la vue
+  prepare les mises a jour de ce perimetre, avec confirmation.
+- **Security** : les alertes et avertissements groupes par crate, sans repeter
+  une meme alerte transitive lorsqu'elle passe par plusieurs dependances.
+  Le titre, la severite et les chemins de dependances restent au survol.
+  Un audit indisponible est signale, jamais presente comme une absence d'alertes.
+
+Les trois vues reutilisent les resultats du scan existant : developper un arbre,
+filtrer ou survoler une ligne ne relance ni Cargo ni les recherches crates.io.
+Les groupes sont replies par defaut; les compteurs et versions sont discrets,
+les actions n'apparaissent qu'au survol des lignes.
+
+Les mises a jour du panneau ne sauvegardent rien et ne modifient pas `Cargo.lock`.
+Une dependance heritee est modifiee dans sa vraie declaration
+`[workspace.dependencies]`, une seule fois meme si plusieurs membres la partagent.
+Les manifestes modifies depuis leur analyse sont marques `modified` :
+les sauvegarder pour rafraichir les resultats avant une mise a jour du panneau.
+Une modification pendant la confirmation annule l'application du lot entier.
+
 Les mises a jour peuvent changer la version majeure ou choisir une prerelease si elle est indiquee comme derniere version. Elles modifient uniquement les exigences de version, sans sauvegarde automatique ni commande `cargo update` : verifier les changements puis sauvegarder pour relancer l'analyse. Les operateurs simples `^`, `~` et `=` sont conserves; les exigences composees ou avec jokers sont remplacees par la version choisie. Les commentaires, options et autres champs restent inchanges.
 Les versions retirees (yanked), les dependances locales, Git et les registres alternatifs ne sont pas modifiables. Une dependance heritee avec `workspace = true` se modifie dans sa declaration `[workspace.dependencies]` du manifeste racine, qui doit etre ouvert pour la commande limitee aux manifestes ouverts. Les mises a jour necessitent un workspace approuve et une analyse disponible; les versions indisponibles sont signalees.
 

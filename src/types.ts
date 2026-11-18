@@ -5,6 +5,8 @@ export interface Dependency {
 	localPath?: string;
 	git?: string;
 	registry?: string;
+	workspace?: 'declaration' | 'inherited';
+	section?: string;
 	versionRange?: { start: number; end: number };
 	line: number;
 }
@@ -44,6 +46,9 @@ export interface DependencyHealth {
 
 export interface AnalysisSnapshot {
 	root: string;
+	packageName?: string;
+	workspaceRoot?: string;
+	auditAvailable?: boolean;
 	contents: string;
 	dependencies: DependencyHealth[];
 	workspaceDependencies?: Dependency[];
