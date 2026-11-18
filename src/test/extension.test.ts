@@ -300,7 +300,7 @@ suite('Extension Test Suite', () => {
 			assert.ok(!view.tooltip.value.includes('Cache hits'));
 			responses.resolve();
 			await operation;
-			const health = analysis.getSnapshot(vscode.Uri.file(root).fsPath)!.dependencies[0];
+			const health = analysis.getSnapshot(root)!.dependencies[0];
 			assert.strictEqual(health.latestPublishedVersion, '0.38.0-beta.1');
 			assert.strictEqual(health.latestStableVersion, '0.37.0');
 			assert.ok(!health.versions.some(version => version.number === health.latestStableVersion));
