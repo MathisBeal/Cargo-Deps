@@ -2,6 +2,27 @@
 
 ## Unreleased
 
+## 0.4.0
+
+- Add a dedicated Cargo Deps activity-bar panel with native Dependencies, Updates
+  and Security views, reusing cached analysis without additional Cargo or HTTP work.
+- Group shared updates by their editable declaration, show every affected crate
+  and retain alternative crate grouping and scoped update batches.
+- Reflect unsaved manifest edits across workspace members, including root-package
+  inheritance, while keeping installed versions and security results tied to the
+  last scan. Keep remaining updates available and explicitly report invalid TOML
+  or dependency sources awaiting analysis.
+- Offer stable panel updates by default, with explicit compatible-release and
+  prerelease modes. Classify Cargo version requirements, confirm potentially
+  breaking updates and reject stale edits or confirmations.
+- Deduplicate transitive security alerts while retaining affected routes, show
+  readable titles and known severity, prioritize serious alerts and distinguish
+  maintenance warnings and unavailable audits.
+- Add compact documentation, repository and crates.io links to dependency hovers,
+  respecting aliases and source types and allowing only safe HTTP(S) destinations.
+- Keep shared workspace edits atomic and deduplicated, preserve comments and
+  dependency options, and leave manifests unsaved without modifying Cargo.lock.
+
 ## 0.3.0
 
 - Restart an active workspace scan immediately when refreshing, cancelling Cargo

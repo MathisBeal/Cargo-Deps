@@ -86,6 +86,7 @@ export class CratesIoService {
 					? crateData.crate.max_stable_version
 					: versions.find(version => !version.yanked)?.number ?? versions[0]?.number ?? '',
 			versions,
+			latestStableVersion: typeof crateData.crate?.max_stable_version === 'string' ? crateData.crate.max_stable_version : undefined,
 			documentationUrl: typeof crateData.crate?.documentation === 'string' ? crateData.crate.documentation : undefined,
 			repositoryUrl: typeof crateData.crate?.repository === 'string' ? crateData.crate.repository : undefined,
 		};

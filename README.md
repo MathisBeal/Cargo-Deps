@@ -29,12 +29,25 @@ repliables et deplacables comme les autres vues de VS Code :
   Le survol reprend les informations de l'editeur, y compris les liens de
   documentation/depot et les versions cliquables. Cliquer ouvre le manifeste.
 - **Updates** : uniquement les exigences pouvant etre passees a une version plus
-  recente. Le filtre permet de choisir toutes les crates ou une seule. La fleche
-  d'une dependance met a jour sa declaration; celle d'une crate ou de la vue
-  prepare les mises a jour de ce perimetre, avec confirmation.
+  recente. Par defaut, chaque declaration modifiable n'apparait qu'une fois,
+  avec le nombre de crates utilisatrices; developper la ligne montre leurs usages.
+  Deux declarations independantes d'un meme package restent distinctes.
+  Le bouton de filtre configure le perimetre (toutes les crates ou une seule),
+  le regroupement (par declaration ou par crate) et les versions proposees.
+  Les versions stables sont proposees par defaut; un mode compatible avec
+  l'exigence actuelle et un mode incluant les prereleases sont disponibles.
+  Le mode compatible utilise les versions deja connues dans l'historique recent.
+  Chaque ligne distingue une version compatible, hors plage, prerelease ou de
+  compatibilite inconnue, selon les exigences Cargo, y compris les versions `0.x`.
+  La fleche met a jour la declaration; celle d'une crate ou de la vue prepare un lot.
+  Le bouton de mise a jour individuelle hors plage, prerelease ou de compatibilite inconnue
+  demande confirmation; un lot est toujours confirme avec ses types de changements.
 - **Security** : les alertes et avertissements groupes par crate, sans repeter
   une meme alerte transitive lorsqu'elle passe par plusieurs dependances.
-  Le titre, la severite et les chemins de dependances restent au survol.
+  Le titre court et la severite sont visibles; les vulnerabilites de gravite
+  connue passent en premier, avant les avertissements de maintenance.
+  Une severite non determinee reste explicitement inconnue, sans score devine
+  a partir d'un vecteur CVSS. L'identifiant technique et les chemins restent au survol.
   Un audit indisponible est signale, jamais presente comme une absence d'alertes.
 
 Les trois vues reutilisent les resultats du scan existant : developper un arbre,
@@ -45,11 +58,19 @@ les actions n'apparaissent qu'au survol des lignes.
 Les mises a jour du panneau ne sauvegardent rien et ne modifient pas `Cargo.lock`.
 Une dependance heritee est modifiee dans sa vraie declaration
 `[workspace.dependencies]`, une seule fois meme si plusieurs membres la partagent.
-Les manifestes modifies depuis leur analyse sont marques `modified` :
-les sauvegarder pour rafraichir les resultats avant une mise a jour du panneau.
-Une modification pendant la confirmation annule l'application du lot entier.
+Le nombre d'utilisateurs et l'arbre des usages gardent tous les membres concernes,
+meme avec un filtre sur une seule crate : changer une declaration partagee les affecte tous.
+Les modifications non sauvegardees sont repercutees dans le panneau, avec un etat
+`pending edits` et les nouvelles exigences marquees `pending`. D'autres dependances
+du meme manifeste restent modifiables sans sauvegarder entre chaque action.
+Les versions installees et alertes restent celles du dernier scan, comme indique
+au survol; sauvegarder relance leur analyse. Les changements de source ne recuperent
+pas les anciennes metadonnees d'un package homonyme.
+Un TOML temporairement invalide est signale et ses actions sont bloquees jusqu'a
+correction. Une modification d'un manifeste concerne ou de son analyse pendant
+la confirmation annule l'application du lot entier.
 
-Les mises a jour peuvent changer la version majeure ou choisir une prerelease si elle est indiquee comme derniere version. Elles modifient uniquement les exigences de version, sans sauvegarde automatique ni commande `cargo update` : verifier les changements puis sauvegarder pour relancer l'analyse. Les operateurs simples `^`, `~` et `=` sont conserves; les exigences composees ou avec jokers sont remplacees par la version choisie. Les commentaires, options et autres champs restent inchanges.
+Les mises a jour peuvent changer la version majeure; dans le panneau, les prereleases necessitent le mode explicite. Les versions cliquables du survol et les commandes historiques vers la derniere version conservent leur comportement. Ces actions modifient uniquement les exigences de version, sans sauvegarde automatique ni commande `cargo update` : verifier les changements puis sauvegarder pour relancer l'analyse. Les operateurs simples `^`, `~` et `=` sont conserves; les exigences composees ou avec jokers sont remplacees par la version choisie. Les commentaires, options et autres champs restent inchanges.
 Les versions retirees (yanked), les dependances locales, Git et les registres alternatifs ne sont pas modifiables. Une dependance heritee avec `workspace = true` se modifie dans sa declaration `[workspace.dependencies]` du manifeste racine, qui doit etre ouvert pour la commande limitee aux manifestes ouverts. Les mises a jour necessitent un workspace approuve et une analyse disponible; les versions indisponibles sont signalees.
 
 ## Prerequis

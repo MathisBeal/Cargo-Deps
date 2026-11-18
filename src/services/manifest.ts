@@ -3,6 +3,12 @@ import { dependencySources, sourceKey } from './manifestSource';
 
 const DEPENDENCY_TABLES = new Set(['dependencies', 'dev-dependencies', 'build-dependencies']);
 
+export function sameDependencySource(left: Dependency, right: Dependency): boolean {
+	return left.name === right.name && left.packageName === right.packageName && left.section === right.section
+		&& left.workspace === right.workspace && left.git === right.git && left.registry === right.registry
+		&& left.localPath === right.localPath;
+}
+
 export interface ParsedManifest {
 	packageName?: string;
 	dependencies: Dependency[];

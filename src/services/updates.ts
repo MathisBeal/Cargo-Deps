@@ -1,9 +1,10 @@
 import * as vscode from 'vscode';
 import * as path from 'node:path';
 import { DependencyAnalysisService } from './analysis';
-import { isCratesIoDependency, parseDependencies } from './manifest';
+import { isCratesIoDependency, parseDependencies, sameDependencySource } from './manifest';
 import type { AnalysisSnapshot, DependencyHealth } from '../types';
 import { isOutdated } from '../providers/hintsProvider';
+import { gt, valid } from 'semver';
 
 export const SET_VERSION_COMMAND = 'cargo-deps.setVersion';
 
@@ -29,7 +30,7 @@ export async function documentHealth(document: vscode.TextDocument, analysis: De
 	}
 	const dependencies = await parseDependencies(document.getText(), snapshot.workspaceDependencies);
 	return dependencies.flatMap(dependency => {
-		const previous = snapshot.dependencies.find(item => item.dependency.name === dependency.name && item.dependency.packageName === dependency.packageName);
+		const previous = snapshot.dependencies.find(item => sameDependencySource(item.dependency, dependency));
 		return previous ? [{ ...previous, dependency }] : [];
 	});
 }
@@ -57,7 +58,8 @@ function versionReplacement(health: DependencyHealth, version: string, current: 
 
 export function canUpdateToLatest(health: DependencyHealth): boolean {
 	return isCratesIoDependency(health.dependency)
-		&& isOutdated(health.installedVersion, health.latestVersion)
+		&& (valid(health.installedVersion) && valid(health.latestVersion)
+			? gt(health.latestVersion, health.installedVersion) : isOutdated(health.installedVersion, health.latestVersion))
 		&& versionReplacement(health, health.latestVersion, health.dependency.versionRequirement) !== undefined;
 }
 
@@ -66,15 +68,23 @@ export interface DependencyUpdateRequest {
 	health: DependencyHealth;
 }
 
+export interface SnapshotSource {
+	getSnapshot(root: string): AnalysisSnapshot | undefined;
+}
+
 export interface DependencyUpdatePlan {
 	edit: vscode.WorkspaceEdit;
 	documents: { snapshot: AnalysisSnapshot; document: vscode.TextDocument; version: number }[];
 	count: number;
 }
 
-export function dependencyUpdateTarget(analysis: DependencyAnalysisService, request: DependencyUpdateRequest): DependencyUpdateRequest {
+export function dependencyUpdateTarget(analysis: SnapshotSource, request: DependencyUpdateRequest): DependencyUpdateRequest {
 	const { snapshot, health } = request;
-	if (analysis.getSnapshot(snapshot.root) !== snapshot || !snapshot.dependencies.includes(health)) {
+	if (analysis.getSnapshot(snapshot.root) !== snapshot || !snapshot.dependencies.some(candidate =>
+		candidate.dependency === health.dependency && (candidate.latestVersion === health.latestVersion
+			|| candidate.latestStableVersion === health.latestVersion
+			|| candidate.latestPublishedVersion === health.latestVersion
+			|| candidate.versions.some(version => version.number === health.latestVersion && !version.yanked)))) {
 		throw new Error('Dependency analysis changed. Select the dependency again.');
 	}
 	if (health.dependency.workspace !== 'inherited') {
@@ -89,7 +99,7 @@ export function dependencyUpdateTarget(analysis: DependencyAnalysisService, requ
 	return { snapshot: workspace, health: declaration };
 }
 
-export async function prepareDependencyUpdates(analysis: DependencyAnalysisService, requests: readonly DependencyUpdateRequest[]): Promise<DependencyUpdatePlan> {
+export async function prepareDependencyUpdates(analysis: SnapshotSource, requests: readonly DependencyUpdateRequest[]): Promise<DependencyUpdatePlan> {
 	if (!vscode.workspace.isTrusted) {
 		throw new Error('Trust this workspace to update Cargo dependencies.');
 	}
@@ -116,7 +126,9 @@ export async function prepareDependencyUpdates(analysis: DependencyAnalysisServi
 		await readDocument(request.snapshot);
 		const document = await readDocument(target.snapshot);
 		const version = request.health.latestVersion;
-		if (target.health.latestVersion !== version && !target.health.versions.some(release => release.number === version && !release.yanked)) {
+		if (target.health.latestVersion !== version && target.health.latestStableVersion !== version
+			&& target.health.latestPublishedVersion !== version
+			&& !target.health.versions.some(release => release.number === version && !release.yanked)) {
 			throw new Error(`Version ${version} is unavailable for ${target.health.dependency.name} in its declaration.`);
 		}
 		const edit = versionEdit(document, target.health, version);
@@ -143,7 +155,7 @@ export async function prepareDependencyUpdates(analysis: DependencyAnalysisServi
 	return plan;
 }
 
-function validateDependencyUpdatePlan(analysis: DependencyAnalysisService, plan: DependencyUpdatePlan): void {
+function validateDependencyUpdatePlan(analysis: SnapshotSource, plan: DependencyUpdatePlan): void {
 	for (const { snapshot, document, version } of plan.documents) {
 		if (analysis.getSnapshot(snapshot.root) !== snapshot || document.version !== version) {
 			throw new Error('A manifest or its analysis changed while preparing updates. Select the updates again.');
@@ -151,7 +163,7 @@ function validateDependencyUpdatePlan(analysis: DependencyAnalysisService, plan:
 	}
 }
 
-export async function applyDependencyUpdates(analysis: DependencyAnalysisService, plan: DependencyUpdatePlan): Promise<void> {
+export async function applyDependencyUpdates(analysis: SnapshotSource, plan: DependencyUpdatePlan): Promise<void> {
 	if (!vscode.workspace.isTrusted) {
 		throw new Error('Trust this workspace to update Cargo dependencies.');
 	}
@@ -186,7 +198,8 @@ export async function setVersion(analysis: DependencyAnalysisService, value: unk
 	if (document.version !== selection.documentVersion || !health) {
 		throw new Error('The manifest has changed. Reopen the dependency hover and try again.');
 	}
-	if (selection.version !== health.latestVersion && !health.versions.some(release => release.number === selection.version && !release.yanked)) {
+	if (selection.version !== health.latestVersion && selection.version !== health.latestStableVersion
+		&& selection.version !== health.latestPublishedVersion && !health.versions.some(release => release.number === selection.version && !release.yanked)) {
 		throw new Error('This version is not available in the dependency analysis.');
 	}
 	const edit = versionEdit(document, health, selection.version);

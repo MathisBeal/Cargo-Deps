@@ -28,6 +28,7 @@ export interface PublishedVersion {
 
 export interface CrateReleaseInfo {
 	latestVersion: string;
+	latestStableVersion?: string;
 	versions: PublishedVersion[];
 	documentationUrl?: string;
 	repositoryUrl?: string;
@@ -37,6 +38,8 @@ export interface DependencyHealth {
 	dependency: Dependency;
 	installedVersion: string;
 	latestVersion: string;
+	latestStableVersion?: string;
+	latestPublishedVersion?: string;
 	versions: PublishedVersion[];
 	documentationUrl?: string;
 	repositoryUrl?: string;
