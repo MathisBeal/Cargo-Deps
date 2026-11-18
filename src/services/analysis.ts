@@ -280,6 +280,8 @@ export class DependencyAnalysisService {
 				dependency,
 				installedVersion: outdated?.project || cleanVersion(dependency.versionRequirement),
 				latestVersion: isCratesIoDependency(dependency) ? outdated?.latest || releaseInfo?.latestVersion || '' : '',
+				latestStableVersion: releaseInfo?.latestStableVersion,
+				latestPublishedVersion: releaseInfo?.latestVersion,
 				versions: releaseInfo?.versions ?? [],
 				documentationUrl: releaseInfo?.documentationUrl,
 				repositoryUrl: releaseInfo?.repositoryUrl,

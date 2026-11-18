@@ -254,8 +254,8 @@ suite('Extension Test Suite', () => {
 			fetchCalls++;
 			await responses.promise;
 			return Response.json(String(input).includes('/versions')
-				? { versions: [{ num: '0.37.0', created_at: '2026-10-01', yanked: false }] }
-				: { crate: { max_version: '0.37.0' } });
+				? { versions: [{ num: '0.38.0-beta.1', created_at: '2026-10-01', yanked: false }] }
+				: { crate: { max_version: '0.38.0-beta.1', max_stable_version: '0.37.0' } });
 		};
 		class TestCargoService extends CargoService {
 			override async workspaceRoot() { return root; }
@@ -300,6 +300,10 @@ suite('Extension Test Suite', () => {
 			assert.ok(!view.tooltip.value.includes('Cache hits'));
 			responses.resolve();
 			await operation;
+			const health = analysis.getSnapshot(vscode.Uri.file(root).fsPath)!.dependencies[0];
+			assert.strictEqual(health.latestPublishedVersion, '0.38.0-beta.1');
+			assert.strictEqual(health.latestStableVersion, '0.37.0');
+			assert.ok(!health.versions.some(version => version.number === health.latestStableVersion));
 			const completed = events[events.length - 1];
 			assert.strictEqual(completed.status, 'completed');
 			assert.strictEqual(completed.requestsCompleted, 2);

@@ -7,12 +7,14 @@ import { parseDependencies, parseManifest } from '../services/manifest';
 import { DependencyAnalysisService } from '../services/analysis';
 import {
 	applyDependencyUpdates, documentHealth, prepareDependencyUpdates, selectionFor, setVersion,
-	updateManifests, versionEdit, SET_VERSION_COMMAND,
+	updateManifests, versionEdit, canUpdateToLatest, SET_VERSION_COMMAND,
 } from '../services/updates';
 import { CargoCodeActionsProvider } from '../providers/codeActionsProvider';
 import { CargoHoverProvider } from '../providers/hoverProvider';
 import { CargoHintsProvider } from '../providers/hintsProvider';
 import { DependencyTreeProvider } from '../providers/dependencyTree';
+import { PanelModel } from '../services/panelModel';
+import { releaseForPolicy, versionChange } from '../services/versionChanges';
 import type { AnalysisSnapshot, Dependency, DependencyHealth } from '../types';
 
 function healthFor(dependency: DependencyHealth['dependency']): DependencyHealth {
@@ -330,6 +332,7 @@ suite('Dependency version updates', () => {
 		const model = new TestAnalysis();
 		const dependencies = new DependencyTreeProvider('dependencies', model);
 		const updates = new DependencyTreeProvider('updates', model);
+		updates.setGrouping('crate');
 		try {
 			const app = await manifest([
 				'[package]', 'name = "api"', 'version = "0.1.0"',
@@ -395,7 +398,8 @@ suite('Dependency version updates', () => {
 			assert.ok(shared?.kind === 'advisory');
 			assert.equal(shared.via.length, 2);
 			const item = security.getTreeItem(shared);
-			assert.equal(item.label, 'RUSTSEC-TEST-1');
+			assert.equal(item.label, advisory.title);
+			assert.ok(String(item.description).includes('High'));
 			assert.ok(!String(item.description).includes(advisory.title));
 			assert.ok(item.tooltip instanceof vscode.MarkdownString);
 			assert.ok(item.tooltip.value.replaceAll('&nbsp;', ' ').includes(advisory.title));
@@ -432,10 +436,11 @@ suite('Dependency version updates', () => {
 				edit.insert(source.uri, new vscode.Position(0, 0), '# Unsaved\n');
 				assert.equal(await vscode.workspace.applyEdit(edit), true);
 				assert.ok(changes > 0);
-				assert.ok(String(tree.getTreeItem(tree.getChildren()[0]).description).includes('modified'));
+				await tree.model.whenSettled();
+				assert.ok(String(tree.getTreeItem(tree.getChildren()[0]).description).includes('pending edits'));
 				assert.notEqual(tree.getTreeItem(node).contextValue, 'cargo-deps.updatable');
 				const changedItem = await tree.resolveTreeItem(tree.getTreeItem(node), node, token.token);
-				assert.ok(String(changedItem.tooltip).includes('Save'));
+				assert.ok(String(changedItem.tooltip).includes('Reopen'));
 				await assert.rejects(prepareDependencyUpdates(model, [node]), /Save/);
 				await model.addManifest(source.snapshot.root, source.document.getText());
 				await assert.rejects(prepareDependencyUpdates(model, [node]), /analysis changed/);
@@ -524,6 +529,230 @@ suite('Dependency version updates', () => {
 			assert.equal(source.document.getText(), '[dependencies]\nserde = "1.0"');
 		} finally {
 			model.dispose();
+		}
+	});
+
+	test('aggregates only shared physical declarations and keeps crate grouping and scope available', async () => {
+		const analysis = new TestAnalysis();
+		const declaration = 'transport = { package = "serde", version = "^1.0" }';
+		const context = await parseDependencies(`[workspace.dependencies]\n${declaration}`);
+		const workspace = await manifest([
+			'[package]', 'name = "host"', 'version = "0.1.0"',
+			'[workspace.dependencies]', declaration,
+			'[dependencies]', 'transport = { package = "serde", version = "=1.0" }',
+			'[dev-dependencies]', 'transport.workspace = true',
+		].join('\n'), context, analysis);
+		workspace.snapshot.workspaceRoot = workspace.snapshot.root;
+		const members = [];
+		for (const name of ['api', 'worker']) {
+			const member = await manifest(`[package]\nname = "${name}"\nversion = "0.1.0"\n[dependencies]\ntransport.workspace = true`,
+				workspace.dependencies.map(health => health.dependency), analysis);
+			member.snapshot.workspaceRoot = workspace.snapshot.root;
+			members.push(member);
+		}
+		await manifest('[package]\nname = "independent"\nversion = "0.1.0"\n[dependencies]\ntransport = { package = "serde", version = "^1.0" }', [], analysis);
+		const tree = new DependencyTreeProvider('updates', analysis);
+		try {
+			await tree.model.whenSettled();
+			assert.equal(tree.getChildren().length, 3, 'Independent and same-named root declarations must stay separate');
+			const shared = tree.getChildren().find(node => node.kind === 'update' && node.requests.length === 4);
+			assert.ok(shared?.kind === 'update');
+			assert.equal(tree.getTreeItem(shared).label, 'serde (transport)');
+			assert.ok(String(tree.getTreeItem(shared).description).includes('3 crate(s)'));
+			assert.deepEqual(tree.getChildren(shared).map(node => tree.getTreeItem(node).label), ['api', 'host', 'worker']);
+			assert.equal(new Set(tree.getChildren().map(node => tree.getTreeItem(node).id)).size, 3);
+			tree.setGrouping('crate');
+			assert.equal(tree.getChildren().length, 4);
+			tree.setFilter(members[0].snapshot.root);
+			assert.equal(tree.getChildren().length, 1);
+			assert.equal(tree.getTreeItem(tree.getChildren()[0]).label, 'api');
+			tree.setGrouping('dependency');
+			const scoped = tree.getChildren()[0];
+			assert.ok(scoped.kind === 'update');
+			assert.equal(scoped.requests.length, 1);
+			assert.ok(String(tree.getTreeItem(scoped).description).includes('3 crate(s)'), 'Scope must not hide the impact on other crates');
+			assert.equal(tree.getChildren(scoped).length, 3);
+			const staleMemberPlan = await prepareDependencyUpdates(tree.model, scoped.requests);
+			tree.setFilter(undefined);
+			const plan = await prepareDependencyUpdates(tree.model, shared.requests);
+			assert.equal(plan.count, 1);
+			await applyDependencyUpdates(tree.model, plan);
+			await tree.model.whenSettled();
+			assert.equal(tree.getChildren().length, 2, 'The shared pending update must disappear without rescanning');
+			assert.equal(workspace.document.isDirty, true);
+			assert.ok(workspace.document.getText().includes('version = "^2.0.0"'));
+			assert.equal(tree.model.getSnapshot(workspace.snapshot.root)?.dependencies.find(health => health.dependency.workspace === 'inherited')?.dependency.versionRequirement, '^2.0.0');
+			for (const member of members) {
+				assert.equal(member.document.isDirty, false);
+				assert.equal(tree.model.getSnapshot(member.snapshot.root)?.dependencies[0].dependency.versionRequirement, '^2.0.0');
+				assert.equal(member.snapshot.dependencies[0].dependency.versionRequirement, '^1.0');
+			}
+			await assert.rejects(applyDependencyUpdates(tree.model, staleMemberPlan), /changed/);
+		} finally {
+			tree.dispose();
+			analysis.dispose();
+		}
+	});
+
+	test('keeps remaining updates available after successive unsaved edits and preserves section-specific metadata', async () => {
+		const analysis = new TestAnalysis();
+		const source = await manifest('[dependencies]\nserde = "^1.0"\ntokio = "1.0"\n[dev-dependencies]\nserde = "0.5"', [], analysis);
+		source.dependencies[2].installedVersion = '0.5.0';
+		const model = new PanelModel(analysis);
+		const tree = new DependencyTreeProvider('dependencies', analysis, model);
+		try {
+			await model.whenSettled();
+			const original = { snapshot: source.snapshot, health: source.dependencies[1] };
+			const first = await prepareDependencyUpdates(model, [{ snapshot: source.snapshot, health: source.dependencies[0] }]);
+			await applyDependencyUpdates(model, first);
+			await model.whenSettled();
+			assert.ok(model.isPending(source.snapshot.root));
+			assert.ok(source.document.isDirty);
+			assert.equal(source.snapshot.dependencies[0].dependency.versionRequirement, '^1.0');
+			await assert.rejects(prepareDependencyUpdates(model, [original]), /analysis changed/);
+			const rows = tree.getChildren(tree.getChildren()[0]);
+			const pending = rows.find(node => node.kind === 'dependency' && node.health.dependency.name === 'serde' && node.health.dependency.section === 'dependencies')!;
+			assert.ok(String(tree.getTreeItem(pending).description).includes('^2.0.0 (pending)'));
+			const token = new vscode.CancellationTokenSource();
+			try {
+				const item = await tree.resolveTreeItem(tree.getTreeItem(pending), pending, token.token);
+				assert.ok(item.tooltip instanceof vscode.MarkdownString && item.tooltip.value.includes('from the last scan'));
+			} finally {
+				token.dispose();
+			}
+			const next = rows.find(node => node.kind === 'dependency' && node.health.dependency.name === 'tokio');
+			assert.ok(next?.kind === 'dependency');
+			assert.equal(tree.getTreeItem(next).contextValue, 'cargo-deps.updatable');
+			const second = await prepareDependencyUpdates(model, [next]);
+			await applyDependencyUpdates(model, second);
+			await model.whenSettled();
+			assert.ok(source.document.getText().includes('tokio = "2.0.0"'));
+			assert.equal(await readFile(source.uri.fsPath, 'utf8'), source.snapshot.contents);
+			const metadata = await documentHealth(source.document, analysis);
+			assert.equal(metadata.find(health => health.dependency.section === 'dev-dependencies')?.installedVersion, '0.5.0');
+			assert.equal(model.getSnapshot(source.snapshot.root)?.dependencies.find(health => health.dependency.section === 'dev-dependencies')?.installedVersion, '0.5.0');
+		} finally {
+			tree.dispose();
+			model.dispose();
+			analysis.dispose();
+		}
+	});
+
+	test('surfaces invalid buffers, recovers after rapid edits and never reuses metadata for a changed source', async () => {
+		const analysis = new TestAnalysis();
+		const source = await manifest('[dependencies]\nserde = "1.0"', [], analysis);
+		const tree = new DependencyTreeProvider('updates', analysis);
+		const replace = async (text: string) => {
+			const edit = new vscode.WorkspaceEdit();
+			edit.replace(source.uri, new vscode.Range(new vscode.Position(0, 0), source.document.positionAt(source.document.getText().length)), text);
+			assert.equal(await vscode.workspace.applyEdit(edit), true);
+		};
+		try {
+			await tree.model.whenSettled();
+			await replace('[dependencies]\nserde = {');
+			await tree.model.whenSettled();
+			assert.ok(tree.model.problem(source.snapshot.root));
+			assert.equal(tree.model.getSnapshot(source.snapshot.root), undefined);
+			assert.equal(tree.getUpdateRequests().length, 0);
+			assert.equal(tree.getChildren()[0].kind, 'message');
+			assert.ok(String(tree.getTreeItem(tree.getChildren()[0]).tooltip).includes('TOML'));
+			await assert.rejects(prepareDependencyUpdates(tree.model, [{ snapshot: source.snapshot, health: source.dependencies[0] }]), /analysis changed/);
+			await replace('[dependencies]\nserde = "');
+			await replace('# Recovered\n[dependencies]\nserde = "1.0"');
+			await tree.model.whenSettled();
+			assert.equal(tree.model.problem(source.snapshot.root), undefined);
+			assert.equal(tree.getUpdateRequests().length, 1);
+			assert.equal(tree.getUpdateRequests()[0].health.dependency.line, 2);
+			await replace(source.snapshot.contents);
+			await tree.model.whenSettled();
+			assert.equal(tree.model.isPending(source.snapshot.root), false);
+			assert.strictEqual(tree.model.getSnapshot(source.snapshot.root), source.snapshot);
+			await replace('[dependencies]\nserde = { git = "https://example.invalid/serde", version = "1.0" }');
+			await tree.model.whenSettled();
+			const health = tree.model.getSnapshot(source.snapshot.root)?.dependencies[0];
+			assert.ok(health);
+			assert.equal(health.installedVersion, '');
+			assert.equal(health.latestVersion, '');
+			assert.equal(health.auditAvailable, false);
+			assert.deepEqual(await documentHealth(source.document, analysis), []);
+			assert.equal(tree.getUpdateRequests().length, 0);
+		} finally {
+			tree.dispose();
+			analysis.dispose();
+		}
+	});
+
+	test('classifies Cargo ranges rather than npm bare-version ranges and rejects unknown syntax', () => {
+		const cases = [
+			['1.2.3', '1.9.0', 'compatible'], ['1.2', '1.9.0', 'compatible'], ['1', '2.0.0', 'outside range'],
+			['^0.2.3', '0.3.0', 'outside range'], ['0.0.3', '0.0.4', 'outside range'],
+			['~1.2', '1.3.0', 'outside range'], ['=1.2.3', '1.2.4', 'outside range'],
+			['>=1.2, <2', '1.9.0', 'compatible'], ['>=1.2, <2', '2.0.0', 'outside range'],
+			['1.2.*', '1.3.0', 'outside range'], ['*', '2.0.0', 'compatible'],
+			['^1.0', '2.0.0-beta.1', 'prerelease'], ['', '2.0.0', 'unknown compatibility'],
+			['1 || 2', '2.0.0', 'unknown compatibility'], ['1.0 - 2.0', '1.5.0', 'unknown compatibility'],
+			['invalid', '2.0.0', 'unknown compatibility'], ['^1', 'invalid', 'unknown compatibility'],
+		];
+		for (const [requirement, latest, expected] of cases) {
+			const health = healthFor({ name: 'serde', packageName: 'serde', versionRequirement: requirement, line: 0 });
+			assert.equal(versionChange({ ...health, latestVersion: latest }), expected, `${requirement} -> ${latest}`);
+		}
+	});
+
+	test('defaults to stable releases outside the recent history and explicitly opts into compatible or prerelease targets', async () => {
+		const analysis = new TestAnalysis();
+		const source = await manifest('[dependencies]\nserde = "1.0"', [], analysis);
+		Object.assign(source.dependencies[0], {
+			latestVersion: '3.0.0-beta.1', latestStableVersion: '2.0.0', latestPublishedVersion: '3.0.0-beta.1',
+			versions: [{ number: '1.5.0', createdAt: '', yanked: false }],
+		});
+		const tree = new DependencyTreeProvider('updates', analysis);
+		try {
+			await tree.model.whenSettled();
+			assert.equal(tree.getUpdateRequests()[0].health.latestVersion, '2.0.0');
+			assert.ok(String(tree.getTreeItem(tree.getChildren()[0]).description).includes('outside range'));
+			const stablePlan = await prepareDependencyUpdates(tree.model, tree.getUpdateRequests());
+			assert.equal(stablePlan.count, 1);
+			source.dependencies[0].latestVersion = '2.0.0';
+			tree.setPolicy('compatible');
+			assert.equal(tree.getUpdateRequests()[0].health.latestVersion, '1.5.0');
+			assert.ok(String(tree.getTreeItem(tree.getChildren()[0]).description).includes('compatible'));
+			tree.setPolicy('prereleases');
+			assert.equal(tree.getUpdateRequests()[0].health.latestVersion, '3.0.0-beta.1');
+			assert.ok(String(tree.getTreeItem(tree.getChildren()[0]).description).includes('prerelease'));
+			assert.equal((await prepareDependencyUpdates(tree.model, tree.getUpdateRequests())).count, 1);
+			await setVersion(analysis, selectionFor(source.document, source.dependencies[0], '3.0.0-beta.1'));
+			assert.ok(source.document.getText().includes('serde = "3.0.0-beta.1"'));
+			assert.equal(canUpdateToLatest(releaseForPolicy({ ...source.dependencies[0], installedVersion: '3.0.0-beta.2' }, 'stable')), false);
+			const current = releaseForPolicy({ ...source.dependencies[0], installedVersion: '2.0.0', latestVersion: '2.0.0' }, 'stable');
+			assert.equal(current.latestVersion, '2.0.0', 'An up-to-date dependency must retain its latest-version hover metadata');
+			assert.equal(canUpdateToLatest(current), false);
+		} finally {
+			tree.dispose();
+			analysis.dispose();
+		}
+	});
+
+	test('prioritizes severe security alerts and visually distinguishes maintenance warnings and unknown severity', async () => {
+		const analysis = new TestAnalysis();
+		const source = await manifest('[dependencies]\nserde = "1.0"', [], analysis);
+		const cvss = 'CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H';
+		source.dependencies[0].advisories = ['unmaintained', 'low', undefined, 'critical', 'high', cvss].map((severity, index) => ({
+			id: `RUSTSEC-TEST-${index}`, title: `Readable title ${index}`, severity, packageName: 'serde', packageVersion: '1.0.0',
+		}));
+		const tree = new DependencyTreeProvider('security', analysis);
+		try {
+			const rows = tree.getChildren(tree.getChildren()[0]);
+			assert.deepEqual(rows.map(node => node.kind === 'advisory' ? node.advisory.severity : null), ['critical', 'high', 'low', undefined, cvss, 'unmaintained']);
+			assert.equal(tree.getTreeItem(rows[0]).label, 'Readable title 3');
+			assert.ok(String(tree.getTreeItem(rows[0]).description).includes('Critical'));
+			assert.equal((tree.getTreeItem(rows[0]).iconPath as vscode.ThemeIcon).id, 'error');
+			assert.ok(String(tree.getTreeItem(rows[3]).description).includes('Unknown severity'));
+			assert.ok(String(tree.getTreeItem(rows[4]).description).includes('Unknown severity'));
+			assert.ok(String(tree.getTreeItem(rows[5]).description).includes('Warning'));
+		} finally {
+			tree.dispose();
+			analysis.dispose();
 		}
 	});
 

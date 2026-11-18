@@ -42,7 +42,7 @@
       },
       {
         "command": "cargo-deps.filterUpdates",
-        "title": "Cargo Deps: Filter Updates by Crate",
+        "title": "Cargo Deps: Configure Updates View",
         "icon": "$(filter)"
       },
       {
@@ -67,9 +67,18 @@
     },
     "views": {
       "cargo-deps": [
-        { "id": "cargo-deps.dependencies", "name": "Dependencies" },
-        { "id": "cargo-deps.updates", "name": "Updates" },
-        { "id": "cargo-deps.security", "name": "Security" }
+        {
+          "id": "cargo-deps.dependencies",
+          "name": "Dependencies"
+        },
+        {
+          "id": "cargo-deps.updates",
+          "name": "Updates"
+        },
+        {
+          "id": "cargo-deps.security",
+          "name": "Security"
+        }
       ]
     },
     "menus": {
@@ -103,7 +112,10 @@
         }
       ],
       "commandPalette": [
-        { "command": "cargo-deps.updateDependency", "when": "false" }
+        {
+          "command": "cargo-deps.updateDependency",
+          "when": "false"
+        }
       ]
     }
   },
@@ -128,6 +140,7 @@
   "devDependencies": {
     "@types/mocha": "^10.0.10",
     "@types/node": "24.x",
+    "@types/semver": "^7.8.0",
     "@types/vscode": "^1.140.0",
     "@vscode/test-cli": "^0.0.15",
     "@vscode/test-electron": "^3.0.0",
@@ -139,6 +152,7 @@
     "typescript-eslint": "^8.61.1"
   },
   "dependencies": {
+    "semver": "^7.8.6",
     "smol-toml": "^1.9.1"
   },
   "overrides": {
