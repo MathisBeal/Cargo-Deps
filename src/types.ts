@@ -5,6 +5,8 @@ export interface Dependency {
 	localPath?: string;
 	git?: string;
 	registry?: string;
+	workspace?: 'declaration' | 'inherited';
+	section?: string;
 	versionRange?: { start: number; end: number };
 	line: number;
 }
@@ -26,20 +28,30 @@ export interface PublishedVersion {
 
 export interface CrateReleaseInfo {
 	latestVersion: string;
+	latestStableVersion?: string;
 	versions: PublishedVersion[];
+	documentationUrl?: string;
+	repositoryUrl?: string;
 }
 
 export interface DependencyHealth {
 	dependency: Dependency;
 	installedVersion: string;
 	latestVersion: string;
+	latestStableVersion?: string;
+	latestPublishedVersion?: string;
 	versions: PublishedVersion[];
+	documentationUrl?: string;
+	repositoryUrl?: string;
 	advisories: Advisory[];
 	auditAvailable?: boolean;
 }
 
 export interface AnalysisSnapshot {
 	root: string;
+	packageName?: string;
+	workspaceRoot?: string;
+	auditAvailable?: boolean;
 	contents: string;
 	dependencies: DependencyHealth[];
 	workspaceDependencies?: Dependency[];

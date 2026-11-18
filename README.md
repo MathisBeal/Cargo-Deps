@@ -6,6 +6,7 @@ Extension VS Code pour consulter l'etat des dependances Rust directement dans `C
 
 - Inlay hints pour les versions obsoletes et les vulnerabilites RustSec.
 - Survol d'une dependance avec sa version installee, la derniere version, les avis de securite, l'historique crates.io et les traces transitives.
+- Liens compacts sous le nom de la dependance : documentation et depot declares sur crates.io, puis page de la crate (avec le vrai nom du package en cas d'alias). Les dependances Git proposent leur depot si son URL est HTTP(S); aucun lien crates.io n'est ajoute pour les sources Git, locales ou privees. Seuls les liens HTTP(S) valides et sans identifiants sont affiches. Les liens reutilisent les metadonnees deja analysees et mises en cache, sans requete supplementaire au survol. Aucun emplacement de changelog n'est devine.
 - Analyse automatique de tous les `Cargo.toml` du workspace au demarrage, meme fermes, puis apres sauvegarde, ajout ou suppression d'un manifeste. Les dossiers `target`, `node_modules` et `.git` sont exclus.
 - Diagnostics Information pour les mises a jour et Warning pour les avis RustSec, y compris transitifs, dans l'editeur et le panneau Problemes. Les couleurs dependent du theme VS Code; les compteurs de la barre d'etat affichent les erreurs et avertissements, pas necessairement les informations.
 - Audit et `cargo outdated --workspace` exécutés une seule fois par workspace pendant chaque scan; les resultats de versions restent associes au bon membre. Les reponses crates.io sont mises en cache et les traces `cargo tree` restent scopees au membre pour ne pas melanger les dependances. Les commandes Cargo ne sont executees que dans un workspace approuve.
@@ -18,7 +19,58 @@ Extension VS Code pour consulter l'etat des dependances Rust directement dans `C
 - Versions cliquables dans le survol (derniere version et historique), et actions rapides par dependance (`Ctrl+.`) pour choisir une version.
 - Deux commandes F1 : `Cargo Deps: Update Open Manifests to Latest` pour les `Cargo.toml` ouverts, et `Cargo Deps: Update All Workspace Manifests to Latest` pour tout le workspace.
 
-Les mises a jour peuvent changer la version majeure ou choisir une prerelease si elle est indiquee comme derniere version. Elles modifient uniquement les exigences de version, sans sauvegarde automatique ni commande `cargo update` : verifier les changements puis sauvegarder pour relancer l'analyse. Les operateurs simples `^`, `~` et `=` sont conserves; les exigences composees ou avec jokers sont remplacees par la version choisie. Les commentaires, options et autres champs restent inchanges.
+### Panneau Cargo Deps
+
+L'icone en forme de colis dans la barre d'activite ouvre trois vues natives,
+repliables et deplacables comme les autres vues de VS Code :
+
+- **Dependencies** : les dependances directes, dev et build regroupees par crate,
+  avec leur version. Les declarations partagees du workspace sont aussi visibles.
+  Le survol reprend les informations de l'editeur, y compris les liens de
+  documentation/depot et les versions cliquables. Cliquer ouvre le manifeste.
+- **Updates** : uniquement les exigences pouvant etre passees a une version plus
+  recente. Par defaut, chaque declaration modifiable n'apparait qu'une fois,
+  avec le nombre de crates utilisatrices; developper la ligne montre leurs usages.
+  Deux declarations independantes d'un meme package restent distinctes.
+  Le bouton de filtre configure le perimetre (toutes les crates ou une seule),
+  le regroupement (par declaration ou par crate) et les versions proposees.
+  Les versions stables sont proposees par defaut; un mode compatible avec
+  l'exigence actuelle et un mode incluant les prereleases sont disponibles.
+  Le mode compatible utilise les versions deja connues dans l'historique recent.
+  Chaque ligne distingue une version compatible, hors plage, prerelease ou de
+  compatibilite inconnue, selon les exigences Cargo, y compris les versions `0.x`.
+  La fleche met a jour la declaration; celle d'une crate ou de la vue prepare un lot.
+  Le bouton de mise a jour individuelle hors plage, prerelease ou de compatibilite inconnue
+  demande confirmation; un lot est toujours confirme avec ses types de changements.
+- **Security** : les alertes et avertissements groupes par crate, sans repeter
+  une meme alerte transitive lorsqu'elle passe par plusieurs dependances.
+  Le titre court et la severite sont visibles; les vulnerabilites de gravite
+  connue passent en premier, avant les avertissements de maintenance.
+  Une severite non determinee reste explicitement inconnue, sans score devine
+  a partir d'un vecteur CVSS. L'identifiant technique et les chemins restent au survol.
+  Un audit indisponible est signale, jamais presente comme une absence d'alertes.
+
+Les trois vues reutilisent les resultats du scan existant : developper un arbre,
+filtrer ou survoler une ligne ne relance ni Cargo ni les recherches crates.io.
+Les groupes sont replies par defaut; les compteurs et versions sont discrets,
+les actions n'apparaissent qu'au survol des lignes.
+
+Les mises a jour du panneau ne sauvegardent rien et ne modifient pas `Cargo.lock`.
+Une dependance heritee est modifiee dans sa vraie declaration
+`[workspace.dependencies]`, une seule fois meme si plusieurs membres la partagent.
+Le nombre d'utilisateurs et l'arbre des usages gardent tous les membres concernes,
+meme avec un filtre sur une seule crate : changer une declaration partagee les affecte tous.
+Les modifications non sauvegardees sont repercutees dans le panneau, avec un etat
+`pending edits` et les nouvelles exigences marquees `pending`. D'autres dependances
+du meme manifeste restent modifiables sans sauvegarder entre chaque action.
+Les versions installees et alertes restent celles du dernier scan, comme indique
+au survol; sauvegarder relance leur analyse. Les changements de source ne recuperent
+pas les anciennes metadonnees d'un package homonyme.
+Un TOML temporairement invalide est signale et ses actions sont bloquees jusqu'a
+correction. Une modification d'un manifeste concerne ou de son analyse pendant
+la confirmation annule l'application du lot entier.
+
+Les mises a jour peuvent changer la version majeure; dans le panneau, les prereleases necessitent le mode explicite. Les versions cliquables du survol et les commandes historiques vers la derniere version conservent leur comportement. Ces actions modifient uniquement les exigences de version, sans sauvegarde automatique ni commande `cargo update` : verifier les changements puis sauvegarder pour relancer l'analyse. Les operateurs simples `^`, `~` et `=` sont conserves; les exigences composees ou avec jokers sont remplacees par la version choisie. Les commentaires, options et autres champs restent inchanges.
 Les versions retirees (yanked), les dependances locales, Git et les registres alternatifs ne sont pas modifiables. Une dependance heritee avec `workspace = true` se modifie dans sa declaration `[workspace.dependencies]` du manifeste racine, qui doit etre ouvert pour la commande limitee aux manifestes ouverts. Les mises a jour necessitent un workspace approuve et une analyse disponible; les versions indisponibles sont signalees.
 
 ## Prerequis

@@ -254,8 +254,8 @@ suite('Extension Test Suite', () => {
 			fetchCalls++;
 			await responses.promise;
 			return Response.json(String(input).includes('/versions')
-				? { versions: [{ num: '0.37.0', created_at: '2026-10-01', yanked: false }] }
-				: { crate: { max_version: '0.37.0' } });
+				? { versions: [{ num: '0.38.0-beta.1', created_at: '2026-10-01', yanked: false }] }
+				: { crate: { max_version: '0.38.0-beta.1', max_stable_version: '0.37.0' } });
 		};
 		class TestCargoService extends CargoService {
 			override async workspaceRoot() { return root; }
@@ -300,6 +300,10 @@ suite('Extension Test Suite', () => {
 			assert.ok(!view.tooltip.value.includes('Cache hits'));
 			responses.resolve();
 			await operation;
+			const health = analysis.getSnapshot(root)!.dependencies[0];
+			assert.strictEqual(health.latestPublishedVersion, '0.38.0-beta.1');
+			assert.strictEqual(health.latestStableVersion, '0.37.0');
+			assert.ok(!health.versions.some(version => version.number === health.latestStableVersion));
 			const completed = events[events.length - 1];
 			assert.strictEqual(completed.status, 'completed');
 			assert.strictEqual(completed.requestsCompleted, 2);
@@ -832,6 +836,9 @@ suite('Extension Test Suite', () => {
 			await writeFile(path.join(member, 'Cargo.toml'), '[package]\nname = "member"\nversion = "0.1.0"\n[dependencies]\nserialport.workspace = true');
 			await analysis.refreshAll([root, member, member]);
 			assert.strictEqual(auditCalls, 1);
+			assert.strictEqual(analysis.getSnapshots().length, 2);
+			assert.strictEqual(analysis.getSnapshot(member)?.packageName, 'member');
+			assert.strictEqual(analysis.getSnapshot(member)?.workspaceRoot, root);
 			for (const manifestRoot of [root, member]) {
 				const uri = vscode.Uri.file(path.join(manifestRoot, 'Cargo.toml'));
 				assert.ok(!vscode.workspace.textDocuments.some(document => document.uri.toString() === uri.toString()));
@@ -844,6 +851,61 @@ suite('Extension Test Suite', () => {
 		} finally {
 			subscription.dispose();
 			collection.dispose();
+			analysis.dispose();
+			await rm(root, { recursive: true, force: true });
+		}
+	});
+
+	test('shares resource metadata across workspace members and cached scans without extra HTTP requests', async () => {
+		const root = await mkdtemp(path.join(tmpdir(), 'cargo-deps-resources-'));
+		const member = path.join(root, 'member');
+		const originalFetch = globalThis.fetch;
+		const requests: string[] = [];
+		class TestCargoService extends CargoService {
+			override async workspaceRoot() { return root; }
+			override async audit() { return []; }
+			override async outdated() { return []; }
+		}
+		const analysis = new DependencyAnalysisService(new TestCargoService(), new CratesIoService());
+		globalThis.fetch = async input => {
+			const url = String(input);
+			requests.push(url);
+			return Response.json(url.includes('/versions') ? { versions: [] } : {
+				crate: url.endsWith('/serde') ? {
+					max_version: '1.2.0',
+					documentation: 'https://docs.rs/serde/latest/serde/',
+					repository: 'https://github.com/serde-rs/serde',
+				} : { max_version: '1.2.0', documentation: null, repository: false },
+			});
+		};
+		try {
+			await mkdir(member);
+			await writeFile(path.join(root, 'Cargo.toml'), [
+				'[workspace]',
+				'members = ["member"]',
+				'[workspace.dependencies]',
+				'transport = { package = "serde", version = "1.0" }',
+				'plain = "1.0"',
+			].join('\n'));
+			await writeFile(path.join(member, 'Cargo.toml'), '[dependencies]\ntransport.workspace = true\nplain.workspace = true');
+			for (let scan = 0; scan < 2; scan++) {
+				await analysis.refreshAll([root, member]);
+				for (const manifestRoot of [root, member]) {
+					const dependencies = analysis.getSnapshot(manifestRoot)!.dependencies;
+					const transport = dependencies.find(health => health.dependency.name === 'transport')!;
+					assert.strictEqual(transport.dependency.packageName, 'serde');
+					assert.strictEqual(transport.documentationUrl, 'https://docs.rs/serde/latest/serde/');
+					assert.strictEqual(transport.repositoryUrl, 'https://github.com/serde-rs/serde');
+					const plain = dependencies.find(health => health.dependency.name === 'plain')!;
+					assert.strictEqual(plain.documentationUrl, undefined);
+					assert.strictEqual(plain.repositoryUrl, undefined);
+				}
+				assert.strictEqual(requests.length, 4);
+				assert.strictEqual(new Set(requests).size, 4);
+				assert.ok(requests.every(url => /^https:\/\/crates.io\/api\/v1\/crates\/(serde|plain)(\/versions\?per_page=10)?$/.test(url)));
+			}
+		} finally {
+			globalThis.fetch = originalFetch;
 			analysis.dispose();
 			await rm(root, { recursive: true, force: true });
 		}
@@ -1149,5 +1211,15 @@ suite('Extension Test Suite', () => {
 			assert.ok(extension.packageJSON.contributes.commands.some((item: { command: string }) => item.command === command));
 		}
 		assert.ok(commands.includes(SET_VERSION_COMMAND));
+		for (const command of ['cargo-deps.filterUpdates', 'cargo-deps.updateDependency', 'cargo-deps.updateVisible']) {
+			assert.ok(commands.includes(command));
+		}
+		const contributedViews = extension.packageJSON.contributes.views['cargo-deps'] as { id: string }[];
+		assert.deepStrictEqual(contributedViews.map(view => view.id), [
+			'cargo-deps.dependencies', 'cargo-deps.updates', 'cargo-deps.security',
+		]);
+		for (const view of contributedViews) {
+			await vscode.commands.executeCommand(`${view.id}.focus`);
+		}
 	});
 });

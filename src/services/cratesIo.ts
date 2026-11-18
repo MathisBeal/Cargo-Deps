@@ -58,7 +58,9 @@ export class CratesIoService {
 		if (versionResult.status === 'rejected') {
 			throw versionResult.reason;
 		}
-		const crateData = crateResult.value as { crate?: { max_version?: unknown; max_stable_version?: unknown } };
+		const crateData = crateResult.value as {
+			crate?: { max_version?: unknown; max_stable_version?: unknown; documentation?: unknown; repository?: unknown };
+		};
 		const data = versionResult.value as { versions?: unknown };
 		const versions = Array.isArray(data.versions)
 			? data.versions.flatMap(value => {
@@ -84,6 +86,9 @@ export class CratesIoService {
 					? crateData.crate.max_stable_version
 					: versions.find(version => !version.yanked)?.number ?? versions[0]?.number ?? '',
 			versions,
+			latestStableVersion: typeof crateData.crate?.max_stable_version === 'string' ? crateData.crate.max_stable_version : undefined,
+			documentationUrl: typeof crateData.crate?.documentation === 'string' ? crateData.crate.documentation : undefined,
+			repositoryUrl: typeof crateData.crate?.repository === 'string' ? crateData.crate.repository : undefined,
 		};
 	}
 

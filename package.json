@@ -7,7 +7,7 @@
     "type": "git",
     "url": "https://github.com/MathisBeal/Cargo-Deps.git"
   },
-  "version": "0.3.0",
+  "version": "0.4.0",
   "license": "MIT",
   "packageManager": "pnpm@12.11.2",
   "engines": {
@@ -25,7 +25,8 @@
     "commands": [
       {
         "command": "cargo-deps.refresh",
-        "title": "Cargo Deps: Refresh Dependency Analysis"
+        "title": "Cargo Deps: Refresh Dependency Analysis",
+        "icon": "$(refresh)"
       },
       {
         "command": "cargo-deps.showOutput",
@@ -38,8 +39,85 @@
       {
         "command": "cargo-deps.updateAll",
         "title": "Cargo Deps: Update All Workspace Manifests to Latest"
+      },
+      {
+        "command": "cargo-deps.filterUpdates",
+        "title": "Cargo Deps: Configure Updates View",
+        "icon": "$(filter)"
+      },
+      {
+        "command": "cargo-deps.updateVisible",
+        "title": "Cargo Deps: Update Dependencies in Scope to Latest",
+        "icon": "$(arrow-up)"
+      },
+      {
+        "command": "cargo-deps.updateDependency",
+        "title": "Cargo Deps: Update Dependency to Latest",
+        "icon": "$(arrow-up)"
       }
-    ]
+    ],
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "cargo-deps",
+          "title": "Cargo Deps",
+          "icon": "media/cargo-deps.svg"
+        }
+      ]
+    },
+    "views": {
+      "cargo-deps": [
+        {
+          "id": "cargo-deps.dependencies",
+          "name": "Dependencies"
+        },
+        {
+          "id": "cargo-deps.updates",
+          "name": "Updates"
+        },
+        {
+          "id": "cargo-deps.security",
+          "name": "Security"
+        }
+      ]
+    },
+    "menus": {
+      "view/title": [
+        {
+          "command": "cargo-deps.refresh",
+          "when": "view == cargo-deps.dependencies || view == cargo-deps.updates || view == cargo-deps.security",
+          "group": "navigation@3"
+        },
+        {
+          "command": "cargo-deps.filterUpdates",
+          "when": "view == cargo-deps.updates",
+          "group": "navigation@1"
+        },
+        {
+          "command": "cargo-deps.updateVisible",
+          "when": "view == cargo-deps.updates && isWorkspaceTrusted",
+          "group": "navigation@2"
+        }
+      ],
+      "view/item/context": [
+        {
+          "command": "cargo-deps.updateDependency",
+          "when": "viewItem == cargo-deps.updatable && isWorkspaceTrusted",
+          "group": "inline"
+        },
+        {
+          "command": "cargo-deps.updateVisible",
+          "when": "view == cargo-deps.updates && viewItem == cargo-deps.updateCrate && isWorkspaceTrusted",
+          "group": "inline"
+        }
+      ],
+      "commandPalette": [
+        {
+          "command": "cargo-deps.updateDependency",
+          "when": "false"
+        }
+      ]
+    }
   },
   "scripts": {
     "vscode:prepublish": "pnpm run package",
@@ -62,6 +140,7 @@
   "devDependencies": {
     "@types/mocha": "^10.0.10",
     "@types/node": "24.x",
+    "@types/semver": "^7.8.0",
     "@types/vscode": "^1.140.0",
     "@vscode/test-cli": "^0.0.15",
     "@vscode/test-electron": "^3.0.0",
@@ -73,6 +152,7 @@
     "typescript-eslint": "^8.61.1"
   },
   "dependencies": {
+    "semver": "^7.8.6",
     "smol-toml": "^1.9.1"
   },
   "overrides": {
