@@ -1,14 +1,18 @@
 import * as assert from 'node:assert/strict';
 import * as vscode from 'vscode';
 import * as path from 'node:path';
-import { mkdtemp, writeFile, rm } from 'node:fs/promises';
+import { mkdtemp, writeFile, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { parseDependencies } from '../services/manifest';
+import { parseDependencies, parseManifest } from '../services/manifest';
 import { DependencyAnalysisService } from '../services/analysis';
-import { documentHealth, selectionFor, setVersion, updateManifests, versionEdit, SET_VERSION_COMMAND } from '../services/updates';
+import {
+	applyDependencyUpdates, documentHealth, prepareDependencyUpdates, selectionFor, setVersion,
+	updateManifests, versionEdit, SET_VERSION_COMMAND,
+} from '../services/updates';
 import { CargoCodeActionsProvider } from '../providers/codeActionsProvider';
 import { CargoHoverProvider } from '../providers/hoverProvider';
 import { CargoHintsProvider } from '../providers/hintsProvider';
+import { DependencyTreeProvider } from '../providers/dependencyTree';
 import type { AnalysisSnapshot, Dependency, DependencyHealth } from '../types';
 
 function healthFor(dependency: DependencyHealth['dependency']): DependencyHealth {
@@ -25,12 +29,18 @@ function healthFor(dependency: DependencyHealth['dependency']): DependencyHealth
 class TestAnalysis extends DependencyAnalysisService {
 	private readonly snapshotsForTest = new Map<string, AnalysisSnapshot>();
 	override getSnapshot(root: string) { return this.snapshotsForTest.get(root); }
+	override getSnapshots() { return [...this.snapshotsForTest.values()]; }
+	override forget(root: string) {
+		this.snapshotsForTest.delete(root);
+		super.forget(root);
+	}
 
 	async addManifest(root: string, contents: string, workspaceDependencies: Dependency[] = []) {
 		// Match the URI-derived roots used by the providers, including Windows drive casing.
 		root = vscode.Uri.file(root).fsPath;
-		const dependencies = (await parseDependencies(contents, workspaceDependencies)).map(healthFor);
-		this.snapshotsForTest.set(root, { root, contents, dependencies, workspaceDependencies, updatedAt: 0 });
+		const manifest = await parseManifest(contents, workspaceDependencies);
+		const dependencies = manifest.dependencies.map(healthFor);
+		this.snapshotsForTest.set(root, { root, contents, packageName: manifest.packageName, dependencies, workspaceDependencies, updatedAt: 0 });
 		return dependencies;
 	}
 }
@@ -38,13 +48,13 @@ class TestAnalysis extends DependencyAnalysisService {
 suite('Dependency version updates', () => {
 	const roots: string[] = [];
 	const analysis = new TestAnalysis();
-	async function manifest(contents: string, workspaceDependencies: Dependency[] = []) {
+	async function manifest(contents: string, workspaceDependencies: Dependency[] = [], owner = analysis) {
 		const root = await mkdtemp(path.join(tmpdir(), 'cargo-deps-update-'));
 		roots.push(root);
 		const uri = vscode.Uri.file(path.join(root, 'Cargo.toml'));
 		await writeFile(uri.fsPath, contents);
-		const dependencies = await analysis.addManifest(root, contents, workspaceDependencies);
-		return { uri, document: await vscode.workspace.openTextDocument(uri), dependencies };
+		const dependencies = await owner.addManifest(root, contents, workspaceDependencies);
+		return { uri, document: await vscode.workspace.openTextDocument(uri), dependencies, snapshot: owner.getSnapshot(path.dirname(uri.fsPath))! };
 	}
 	suiteTeardown(async () => {
 		assert.equal(vscode.extensions.getExtension('MathisBEAL.cargo-deps')?.isActive, false,
@@ -314,6 +324,207 @@ suite('Dependency version updates', () => {
 		await updateManifests(analysis, [first.uri, second.uri, thirdUri]);
 		assert.equal(second.document.getText(), '[workspace.dependencies]\nserde = { version = "=2.0.0", features = ["derive"] }');
 		assert.equal((await vscode.workspace.openTextDocument(thirdUri)).getText(), '[dev-dependencies]\nserde = "2.0.0"');
+	});
+
+	test('groups the panel by real crate names, distinguishes sections and filters available updates', async () => {
+		const model = new TestAnalysis();
+		const dependencies = new DependencyTreeProvider('dependencies', model);
+		const updates = new DependencyTreeProvider('updates', model);
+		try {
+			const app = await manifest([
+				'[package]', 'name = "api"', 'version = "0.1.0"',
+				'[dependencies]', 'serde = "1.0"', 'current = "2.0.0"',
+				'local = { path = "../local", version = "1.0" }',
+				'git = { git = "https://example.invalid/repo", version = "1.0" }',
+				'private = { registry = "company", version = "1.0" }', 'retired = "1.0"',
+				'[dev-dependencies]', 'serde = "1.0"',
+			].join('\n'), [], model);
+			app.dependencies.find(health => health.dependency.name === 'retired')!.latestVersion = '1.4.0';
+			const worker = await manifest('[package]\nname = "worker"\nversion = "0.1.0"\n[dependencies]\nserde = "1.0"', [], model);
+			await manifest('[package]\nname = "empty"\nversion = "0.1.0"', [], model);
+			const groups = dependencies.getChildren();
+			assert.deepEqual(groups.map(group => dependencies.getTreeItem(group).label), ['api', 'empty', 'worker']);
+			assert.equal(dependencies.getTreeItem(groups[0]).collapsibleState, vscode.TreeItemCollapsibleState.Collapsed);
+			const rows = dependencies.getChildren(groups[0]);
+			const serde = rows.filter(node => node.kind === 'dependency' && node.health.dependency.name === 'serde');
+			assert.equal(serde.length, 2);
+			assert.notEqual(dependencies.getTreeItem(serde[0]).id, dependencies.getTreeItem(serde[1]).id);
+			assert.ok(serde.some(node => String(dependencies.getTreeItem(node).description).includes('dev')));
+			assert.equal(updates.getUpdateRequests().length, 3);
+			assert.ok(updates.getUpdateRequests().every(request => request.health.dependency.packageName === 'serde'));
+			updates.setFilter(worker.snapshot.root);
+			assert.equal(updates.getChildren().length, 1);
+			assert.equal(updates.getUpdateRequests().length, 1);
+			assert.equal(updates.getChildren()[0].snapshot.packageName, 'worker');
+			model.forget(worker.snapshot.root);
+			assert.equal(updates.filterRoot, undefined);
+			assert.equal(updates.getChildren().length, 1);
+		} finally {
+			dependencies.dispose();
+			updates.dispose();
+			model.dispose();
+		}
+	});
+
+	test('deduplicates transitive security alerts per crate without hiding affected routes or audit failures', async () => {
+		const model = new TestAnalysis();
+		const security = new DependencyTreeProvider('security', model);
+		try {
+			const app = await manifest('[dependencies]\nfirst = "1.0"\nsecond = "1.0"', [], model);
+			const advisory = { id: 'RUSTSEC-TEST-1', title: 'A serious issue', packageName: 'affected', packageVersion: '1.0.0', severity: 'high' };
+			app.dependencies[0].advisories = [
+				{ ...advisory, treePath: '0affected v1.0.0\n1first v1.0.0' },
+				{ ...advisory, id: 'Unknown advisory', title: 'Withdrawn release', severity: 'yanked' },
+				{ ...advisory, id: 'Unknown advisory', title: 'Maintenance warning', severity: 'unmaintained' },
+			];
+			app.dependencies[1].advisories = [
+				{ ...advisory, treePath: '0affected v1.0.0\n1second v1.0.0' },
+				{ ...advisory, packageVersion: '0.5.0' },
+			];
+			app.snapshot.auditAvailable = false;
+			await manifest('[dependencies]\nclean = "1.0"', [], model);
+			const groups = security.getChildren();
+			assert.equal(groups.length, 1);
+			assert.ok(String(security.getTreeItem(groups[0]).description).includes('audit unavailable'));
+			const nodes = security.getChildren(groups[0]);
+			assert.equal(nodes.length, 5);
+			assert.equal(new Set(nodes.map(node => security.getTreeItem(node).id)).size, 5);
+			assert.equal(nodes[0].kind, 'message');
+			assert.equal(security.getTreeItem(nodes[0]).command?.command, 'cargo-deps.showOutput');
+			const shared = nodes.find(node => node.kind === 'advisory' && node.advisory.id === advisory.id && node.advisory.packageVersion === '1.0.0');
+			assert.ok(shared?.kind === 'advisory');
+			assert.equal(shared.via.length, 2);
+			const item = security.getTreeItem(shared);
+			assert.equal(item.label, 'RUSTSEC-TEST-1');
+			assert.ok(!String(item.description).includes(advisory.title));
+			assert.ok(item.tooltip instanceof vscode.MarkdownString);
+			assert.ok(item.tooltip.value.replaceAll('&nbsp;', ' ').includes(advisory.title));
+			assert.ok(item.tooltip.value.includes('first'));
+			assert.ok(item.tooltip.value.includes('second'));
+			assert.ok(item.tooltip.value.includes('affected v1.0.0'));
+			assert.equal(item.tooltip.isTrusted, undefined);
+			assert.equal(item.command?.command, 'vscode.open');
+		} finally {
+			security.dispose();
+			model.dispose();
+		}
+	});
+
+	test('resolves panel hovers lazily using the editor hover and rejects dirty or stale panel updates', async () => {
+		const model = new TestAnalysis();
+		const tree = new DependencyTreeProvider('dependencies', model);
+		const token = new vscode.CancellationTokenSource();
+		try {
+			const source = await manifest('[dependencies]\nserde = "1.0"', [], model);
+			source.dependencies[0].documentationUrl = 'https://docs.rs/serde/';
+			const node = tree.getChildren(tree.getChildren()[0])[0];
+			assert.ok(node.kind === 'dependency');
+			const item = tree.getTreeItem(node);
+			assert.equal(item.tooltip, undefined);
+			const resolved = await tree.resolveTreeItem(item, node, token.token);
+			const hover = await new CargoHoverProvider(model).provideHover(source.document, new vscode.Position(1, 0));
+			assert.ok(hover && resolved.tooltip instanceof vscode.MarkdownString);
+			assert.equal(resolved.tooltip.value, (hover.contents[0] as vscode.MarkdownString).value);
+			let changes = 0;
+			const subscription = tree.onDidChangeTreeData(() => { changes++; });
+			try {
+				const edit = new vscode.WorkspaceEdit();
+				edit.insert(source.uri, new vscode.Position(0, 0), '# Unsaved\n');
+				assert.equal(await vscode.workspace.applyEdit(edit), true);
+				assert.ok(changes > 0);
+				assert.ok(String(tree.getTreeItem(tree.getChildren()[0]).description).includes('modified'));
+				assert.notEqual(tree.getTreeItem(node).contextValue, 'cargo-deps.updatable');
+				const changedItem = await tree.resolveTreeItem(tree.getTreeItem(node), node, token.token);
+				assert.ok(String(changedItem.tooltip).includes('Save'));
+				await assert.rejects(prepareDependencyUpdates(model, [node]), /Save/);
+				await model.addManifest(source.snapshot.root, source.document.getText());
+				await assert.rejects(prepareDependencyUpdates(model, [node]), /analysis changed/);
+			} finally {
+				subscription.dispose();
+			}
+		} finally {
+			token.dispose();
+			tree.dispose();
+			model.dispose();
+		}
+	});
+
+	test('updates a shared inherited declaration once without editing member manifests or a same-named root dependency', async () => {
+		const model = new TestAnalysis();
+		try {
+			const contents = [
+				'[package]', 'name = "host"', 'version = "0.1.0"',
+				'[workspace.dependencies]', 'transport = { package = "serde", version = "^1.0" }',
+				'[dependencies]', 'transport = { package = "serde", version = "0.5.0" }',
+			].join('\n');
+			const workspace = await manifest(contents, [], model);
+			const context = workspace.dependencies.map(health => health.dependency);
+			const members = await Promise.all([
+				manifest('[dependencies]\ntransport.workspace = true', context, model),
+				manifest('[dependencies.transport]\nworkspace = true', context, model),
+			]);
+			for (const member of members) {
+				member.snapshot.workspaceRoot = workspace.snapshot.root;
+			}
+			const declaration = workspace.dependencies.find(health => health.dependency.workspace === 'declaration')!;
+			const requests = [
+				{ snapshot: workspace.snapshot, health: declaration },
+				...members.map(member => ({ snapshot: member.snapshot, health: member.dependencies[0] })),
+			];
+			const plan = await prepareDependencyUpdates(model, requests);
+			assert.equal(plan.count, 1);
+			assert.equal(plan.edit.entries().length, 1);
+			assert.equal(workspace.document.getText(), contents);
+			await applyDependencyUpdates(model, plan);
+			assert.equal(workspace.document.getText(), contents.replace('version = "^1.0"', 'version = "^2.0.0"'));
+			assert.equal(workspace.document.isDirty, true);
+			assert.equal(await readFile(workspace.uri.fsPath, 'utf8'), contents);
+			assert.equal(members[0].document.getText(), '[dependencies]\ntransport.workspace = true');
+			assert.equal(members[1].document.getText(), '[dependencies.transport]\nworkspace = true');
+			model.forget(workspace.snapshot.root);
+			await assert.rejects(prepareDependencyUpdates(model, [requests[1]]), /Workspace declaration/);
+		} finally {
+			model.dispose();
+		}
+	});
+
+	test('applies only the chosen crate scope and refuses an entire prepared batch after a manifest edit', async () => {
+		const model = new TestAnalysis();
+		const updates = new DependencyTreeProvider('updates', model);
+		try {
+			const app = await manifest('[dependencies]\nserde = "1.0"', [], model);
+			const worker = await manifest('[dependencies]\ntokio = "1.0"', [], model);
+			const batch = await prepareDependencyUpdates(model, updates.getUpdateRequests());
+			assert.equal(batch.count, 2);
+			const edit = new vscode.WorkspaceEdit();
+			edit.insert(worker.uri, new vscode.Position(0, 0), '# User edit\n');
+			assert.equal(await vscode.workspace.applyEdit(edit), true);
+			await assert.rejects(applyDependencyUpdates(model, batch), /changed/);
+			assert.equal(app.document.getText(), '[dependencies]\nserde = "1.0"');
+			assert.equal(worker.document.getText(), '# User edit\n[dependencies]\ntokio = "1.0"');
+			updates.setFilter(app.snapshot.root);
+			const scoped = await prepareDependencyUpdates(model, updates.getUpdateRequests());
+			await applyDependencyUpdates(model, scoped);
+			assert.equal(app.document.getText(), '[dependencies]\nserde = "2.0.0"');
+			assert.equal(worker.document.getText(), '# User edit\n[dependencies]\ntokio = "1.0"');
+		} finally {
+			updates.dispose();
+			model.dispose();
+		}
+	});
+
+	test('refuses prepared panel updates if the analysis is replaced during confirmation', async () => {
+		const model = new TestAnalysis();
+		try {
+			const source = await manifest('[dependencies]\nserde = "1.0"', [], model);
+			const request = { snapshot: source.snapshot, health: source.dependencies[0] };
+			const plan = await prepareDependencyUpdates(model, [request]);
+			await model.addManifest(source.snapshot.root, source.document.getText());
+			await assert.rejects(applyDependencyUpdates(model, plan), /analysis changed/);
+			assert.equal(source.document.getText(), '[dependencies]\nserde = "1.0"');
+		} finally {
+			model.dispose();
+		}
 	});
 
 	test('does not offer edits for current, yanked or invalid versions', async () => {

@@ -9,6 +9,7 @@ import { buildDiagnostics } from './providers/diagnosticsProvider';
 import { AnalysisStatusBar } from './providers/statusBar';
 import { AnalysisOutput } from './providers/output';
 import { CargoCodeActionsProvider } from './providers/codeActionsProvider';
+import { DependencyTreeViews } from './providers/dependencyTree';
 import { isCargoManifest, setVersion, SET_VERSION_COMMAND, updateManifests } from './services/updates';
 
 // This method is called when your extension is activated
@@ -17,6 +18,10 @@ export function activate(context: vscode.ExtensionContext) {
 	const analysis = new DependencyAnalysisService();
 	const output = new AnalysisOutput(analysis.onDidProgress);
 	const statusBar = new AnalysisStatusBar(analysis.onDidProgress);
+	const treeViews = new DependencyTreeViews(analysis, (message, error) => {
+		output.error(message, error);
+		void vscode.window.showErrorMessage(`${message} ${error instanceof Error ? error.message : String(error)}`);
+	});
 	const selector: vscode.DocumentSelector = { scheme: 'file', pattern: '**/Cargo.toml' };
 	const diagnostics = vscode.languages.createDiagnosticCollection('cargo-deps');
 	const manifestsWatcher = vscode.workspace.createFileSystemWatcher('**/Cargo.toml');
@@ -89,6 +94,7 @@ export function activate(context: vscode.ExtensionContext) {
 		analysis,
 		output,
 		statusBar,
+		treeViews,
 		diagnostics,
 		manifestsWatcher,
 		{ dispose: () => { disposed = true; scanController?.abort(); } },

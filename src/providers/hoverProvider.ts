@@ -21,11 +21,11 @@ export class CargoHoverProvider implements vscode.HoverProvider {
 			return undefined;
 		}
 
-		return new vscode.Hover(buildHover(health, document), document.lineAt(position.line).range);
+		return new vscode.Hover(buildDependencyHover(health, document), document.lineAt(position.line).range);
 	}
 }
 
-function buildHover(health: DependencyHealth, document: vscode.TextDocument): vscode.MarkdownString {
+export function buildDependencyHover(health: DependencyHealth, document: vscode.TextDocument): vscode.MarkdownString {
 	const { dependency, installedVersion, latestVersion, advisories, versions } = health;
 	const isLocal = Boolean(dependency.localPath);
 	const registryDependency = isCratesIoDependency(dependency);
