@@ -277,6 +277,8 @@ export class DependencyAnalysisService {
 				installedVersion: outdated?.project || cleanVersion(dependency.versionRequirement),
 				latestVersion: isCratesIoDependency(dependency) ? outdated?.latest || releaseInfo?.latestVersion || '' : '',
 				versions: releaseInfo?.versions ?? [],
+				documentationUrl: releaseInfo?.documentationUrl,
+				repositoryUrl: releaseInfo?.repositoryUrl,
 				advisories: advisories.get(dependency.name) ?? [],
 				auditAvailable: !this.auditFailures.has(workspaceRoot),
 			} satisfies DependencyHealth;

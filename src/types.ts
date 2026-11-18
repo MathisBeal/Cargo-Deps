@@ -27,6 +27,8 @@ export interface PublishedVersion {
 export interface CrateReleaseInfo {
 	latestVersion: string;
 	versions: PublishedVersion[];
+	documentationUrl?: string;
+	repositoryUrl?: string;
 }
 
 export interface DependencyHealth {
@@ -34,6 +36,8 @@ export interface DependencyHealth {
 	installedVersion: string;
 	latestVersion: string;
 	versions: PublishedVersion[];
+	documentationUrl?: string;
+	repositoryUrl?: string;
 	advisories: Advisory[];
 	auditAvailable?: boolean;
 }

@@ -40,6 +40,14 @@ function buildHover(health: DependencyHealth, document: vscode.TextDocument): vs
 		return `[${inlineCode(version)}](command:${SET_VERSION_COMMAND}?${args} "Use this version")`;
 	};
 	markdown.appendMarkdown(`### ${escapeMarkdown(dependency.name)}\n\n`);
+	const resources = registryDependency ? [
+		...resourceLink('Documentation', health.documentationUrl),
+		...resourceLink('Repository', health.repositoryUrl),
+		...resourceLink('crates.io', `https://crates.io/crates/${encodeURIComponent(dependency.packageName)}`),
+	] : resourceLink('Repository', dependency.git);
+	if (resources.length) {
+		markdown.appendMarkdown(`${resources.join(' · ')}\n\n`);
+	}
 	markdown.appendMarkdown(`Installed: ${inlineCode(installedVersion || dependency.versionRequirement)} · Latest: ${!registryDependency ? inlineCode(sourceLabel) : latestVersion ? versionLabel(latestVersion) : inlineCode('unknown')}\n\n`);
 	markdown.appendMarkdown(`**Status:** ${isLocal ? `Local path dependency (${inlineCode(dependency.localPath ?? '')})` : !registryDependency ? 'Not checked on crates.io' : isOutdated(installedVersion, latestVersion) ? 'Update available' : 'Up to date or unknown'}\n\n`);
 
@@ -126,6 +134,17 @@ export function formatDependencyPath(tree: string, packageName: string): string 
 		}
 	}
 	return undefined;
+}
+
+function resourceLink(label: string, value: string | undefined): string[] {
+	if (!value || !URL.canParse(value)) {
+		return [];
+	}
+	const url = new URL(value);
+	if ((url.protocol !== 'https:' && url.protocol !== 'http:') || url.username || url.password) {
+		return [];
+	}
+	return [`[${label}](<${url.href}>)`];
 }
 
 function escapeMarkdown(value: string): string {
