@@ -171,6 +171,81 @@ suite('Dependency version updates', () => {
 		}
 	});
 
+	test('offers compact source-aware resource links using package names and preserves them after unsaved edits', async () => {
+		const { document, dependencies } = await manifest([
+			'[dependencies]',
+			'transport = { package = "serde", version = "1.0" }',
+			'plain = "1.0"',
+			'gitdep = { git = "https://example.invalid/project.git" }',
+			'sshdep = { git = "ssh://git@example.invalid/project.git" }',
+			'local = { path = "../local" }',
+			'private = { registry = "company", version = "1.0" }',
+		].join('\n'));
+		dependencies[0].documentationUrl = 'https://docs.rs/serde/latest/serde/';
+		dependencies[0].repositoryUrl = 'https://github.com/serde-rs/serde';
+		for (const dependency of dependencies.slice(2)) {
+			dependency.documentationUrl = 'https://wrong-source.invalid/docs';
+			dependency.repositoryUrl = 'https://wrong-source.invalid/repo';
+		}
+		const provider = new CargoHoverProvider(analysis);
+		const linksAt = async (line: number) => {
+			const hover = await provider.provideHover(document, new vscode.Position(line, 0));
+			assert.ok(hover);
+			return [...(hover.contents[0] as vscode.MarkdownString).value.matchAll(/\[(Documentation|Repository|crates\.io)\]\(<([^<>]+)>\)/g)]
+				.map(([, label, url]) => [label, url]);
+		};
+		const resources = [
+			['Documentation', 'https://docs.rs/serde/latest/serde/'],
+			['Repository', 'https://github.com/serde-rs/serde'],
+			['crates.io', 'https://crates.io/crates/serde'],
+		];
+		assert.deepEqual(await linksAt(1), resources);
+		assert.deepEqual(await linksAt(2), [['crates.io', 'https://crates.io/crates/plain']]);
+		assert.deepEqual(await linksAt(3), [['Repository', 'https://example.invalid/project.git']]);
+		for (const line of [4, 5, 6]) {
+			assert.deepEqual(await linksAt(line), []);
+		}
+		const edit = new vscode.WorkspaceEdit();
+		edit.insert(document.uri, new vscode.Position(0, 0), '# Unsaved comment\n');
+		assert.equal(await vscode.workspace.applyEdit(edit), true);
+		assert.deepEqual(await linksAt(2), resources);
+	});
+
+	test('rejects unsafe resource URLs and keeps Markdown delimiters inside the external link target', async () => {
+		const { document, dependencies } = await manifest('[dependencies]\nserde = "1.0"');
+		const provider = new CargoHoverProvider(analysis);
+		const markdownFor = async (url: string) => {
+			dependencies[0].documentationUrl = url;
+			dependencies[0].repositoryUrl = url;
+			const hover = await provider.provideHover(document, new vscode.Position(1, 0));
+			assert.ok(hover);
+			return hover.contents[0] as vscode.MarkdownString;
+		};
+		for (const url of [
+			'not a URL',
+			'//example.invalid/docs',
+			'command:cargo-deps.setVersion',
+			'javascript:alert(1)',
+			'data:text/html,test',
+			'file:///tmp/docs',
+			'ssh://git@example.invalid/repo',
+			'https://user:password@example.invalid/docs',
+		]) {
+			const markdown = await markdownFor(url);
+			assert.ok(!markdown.value.includes('[Documentation]'));
+			assert.ok(!markdown.value.includes('[Repository]'));
+			assert.ok(!markdown.value.includes(`(<${url}>)`));
+			assert.ok(markdown.value.includes('[crates.io](<https://crates.io/crates/serde>)'));
+			assert.deepEqual(markdown.isTrusted, { enabledCommands: [SET_VERSION_COMMAND] });
+		}
+		const markdown = await markdownFor('https://example.invalid/docs(v1)> [Injected](command:unexpected)');
+		const resources = [...markdown.value.matchAll(/\[(Documentation|Repository)\]\(<([^<>]+)>\)/g)];
+		assert.equal(resources.length, 2);
+		assert.ok(resources.every(([, , target]) => target === 'https://example.invalid/docs(v1)%3E%20[Injected](command:unexpected)'));
+		assert.ok(!markdown.value.includes('> [Injected]'));
+		assert.deepEqual(markdown.isTrusted, { enabledCommands: [SET_VERSION_COMMAND] });
+	});
+
 	test('preserves inherited aliases and sources when providing hovers for unsaved manifests', async () => {
 		const workspaceDependencies = await parseDependencies([
 			'[workspace.dependencies]',

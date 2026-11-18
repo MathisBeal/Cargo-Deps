@@ -849,6 +849,61 @@ suite('Extension Test Suite', () => {
 		}
 	});
 
+	test('shares resource metadata across workspace members and cached scans without extra HTTP requests', async () => {
+		const root = await mkdtemp(path.join(tmpdir(), 'cargo-deps-resources-'));
+		const member = path.join(root, 'member');
+		const originalFetch = globalThis.fetch;
+		const requests: string[] = [];
+		class TestCargoService extends CargoService {
+			override async workspaceRoot() { return root; }
+			override async audit() { return []; }
+			override async outdated() { return []; }
+		}
+		const analysis = new DependencyAnalysisService(new TestCargoService(), new CratesIoService());
+		globalThis.fetch = async input => {
+			const url = String(input);
+			requests.push(url);
+			return Response.json(url.includes('/versions') ? { versions: [] } : {
+				crate: url.endsWith('/serde') ? {
+					max_version: '1.2.0',
+					documentation: 'https://docs.rs/serde/latest/serde/',
+					repository: 'https://github.com/serde-rs/serde',
+				} : { max_version: '1.2.0', documentation: null, repository: false },
+			});
+		};
+		try {
+			await mkdir(member);
+			await writeFile(path.join(root, 'Cargo.toml'), [
+				'[workspace]',
+				'members = ["member"]',
+				'[workspace.dependencies]',
+				'transport = { package = "serde", version = "1.0" }',
+				'plain = "1.0"',
+			].join('\n'));
+			await writeFile(path.join(member, 'Cargo.toml'), '[dependencies]\ntransport.workspace = true\nplain.workspace = true');
+			for (let scan = 0; scan < 2; scan++) {
+				await analysis.refreshAll([root, member]);
+				for (const manifestRoot of [root, member]) {
+					const dependencies = analysis.getSnapshot(manifestRoot)!.dependencies;
+					const transport = dependencies.find(health => health.dependency.name === 'transport')!;
+					assert.strictEqual(transport.dependency.packageName, 'serde');
+					assert.strictEqual(transport.documentationUrl, 'https://docs.rs/serde/latest/serde/');
+					assert.strictEqual(transport.repositoryUrl, 'https://github.com/serde-rs/serde');
+					const plain = dependencies.find(health => health.dependency.name === 'plain')!;
+					assert.strictEqual(plain.documentationUrl, undefined);
+					assert.strictEqual(plain.repositoryUrl, undefined);
+				}
+				assert.strictEqual(requests.length, 4);
+				assert.strictEqual(new Set(requests).size, 4);
+				assert.ok(requests.every(url => /^https:\/\/crates.io\/api\/v1\/crates\/(serde|plain)(\/versions\?per_page=10)?$/.test(url)));
+			}
+		} finally {
+			globalThis.fetch = originalFetch;
+			analysis.dispose();
+			await rm(root, { recursive: true, force: true });
+		}
+	});
+
 	test('reuses workspace manifests and failed release lookups within a scan, then retries on the next scan', async () => {
 		const root = await mkdtemp(path.join(tmpdir(), 'cargo-deps-batch-cache-'));
 		const member = path.join(root, 'member');
